@@ -34,7 +34,7 @@ For Blu-rays with multiple cuts (e.g., Theatrical vs Extended), these scripts re
 * Automatically crossfades in the standard 5.1/7.1 audio for inserted scenes where no AD exists.
 
 ### 4. Full Scripts Index
-Please refer to `scripts/python/README.md` and `scripts/powershell/README.md` for a comprehensive, up-to-date index of all core pipeline, prototyping, and legacy scripts included in this repository.
+Please refer to `scripts/python/README.md` for a comprehensive, up-to-date index of all core pipeline, prototyping, and legacy scripts included in this repository.
 
 ## Setup & Portability
 This tool is self-contained. 
