@@ -7,17 +7,17 @@ Project repository for Audio Description (AD) extraction, multi-track alignment,
 ## 1. BatchEncoder Setup & Configuration Guide (Step-by-Step)
 
 ### A. Directory Structure & Environment Setup
-* **Installation Root**: `C:\Users\nathan\apps\BatchEncoder-5.1-x64\` (Portable Mode via `BatchEncoder.portable`).
-* **Source Code**: `C:\Users\nathan\Projects\git\BatchEncoder\`
+* **Installation Root**: `C:\Path\To\BatchEncoder-5.1-x64\` (Portable Mode via `BatchEncoder.portable`).
+* **Source Code**: `C:\Path\To\git\BatchEncoder\`
 
 ### B. Tool Executable Setup (`tools/`)
 Tools define the CLI binary paths linked to format IDs:
 1. Edit `tools/ffmpeg_x64.xml` (or `tools/ffmpeg_x86.xml`) to point `path` to the binary:
    ```xml
-   path="C:\Users\nathan\AppData\Local\Microsoft\WinGet\Packages\yt-dlp.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-N-125365-g9a01c1cb6a-win64-gpl\bin\ffmpeg.exe"
+   path="C:\Path\To\Local\Microsoft\WinGet\Packages\yt-dlp.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-N-125365-g9a01c1cb6a-win64-gpl\bin\ffmpeg.exe"
    ```
 2. Map supported format IDs in the tool XML: `formats="FFMPEG_FLAC_AAC,FFMPEG_AC3,..."`.
-3. Edit `tools/eac3to_x64.xml` to point `path` to `C:\Users\nathan\apps\eac3to\eac3to_3.63\eac3to.exe`.
+3. Edit `tools/eac3to_x64.xml` to point `path` to `C:\Path\To\eac3to\eac3to_3.63\eac3to.exe`.
 
 ### C. Format & Preset Setup (`formats/`)
 Formats define command templates, file extensions, and preset options:
@@ -44,7 +44,7 @@ Link a Lua script in `function="..."` of format XML to report live `0%-100%` UI 
 * Setting `extension="stereo.m4a"` in format XML forces `$Ext$` to evaluate to `stereo.m4a`—yielding `Filename.stereo.m4a`.
 
 ### F. Validation Commands
-Run PowerShell validation scripts inside `C:\Users\nathan\apps\BatchEncoder-5.1-x64\` to confirm paths and tools:
+Run PowerShell validation scripts inside `C:\Path\To\BatchEncoder-5.1-x64\` to confirm paths and tools:
 ```powershell
 .\validate-tools-path.ps1
 .\validate-formats-path.ps1
@@ -72,10 +72,10 @@ Run PowerShell validation scripts inside `C:\Users\nathan\apps\BatchEncoder-5.1-
 
   # Full 2-pass render for multiple labeled AD tracks:
   python sync_ad_track.py `
-    -r "F:\uploads\The.Godfather.1972.eac3" `
+    -r "F:\uploads\Movie.Title.eac3" `
     -a "UK=F:\uploads\ad\UK_AD.mp3" "US=F:\uploads\ad\US_AD.mp3" `
     -o "F:\uploads\ad_synced" `
-    -t "The Godfather (1972)"
+    -t "Movie Title"
   ```
 
 ### Critical Sync Alignment Rules (Verified 2026-07-30)
@@ -103,7 +103,6 @@ Run PowerShell validation scripts inside `C:\Users\nathan\apps\BatchEncoder-5.1-
 * **Sample-Exact Reassembly**: To achieve perfect sync, use `sync_ad_track.py --preview 30` to test anchors and find the exact sub-millisecond offsets for each segment between the commercial breaks detected by `describealign`. Then use a custom Python script (with `numpy` and `ffmpeg` `f32le` decoding) to surgically slice the AD track at the commercial breaks, inject exact silence gaps (using `np.zeros`), and concatenate the segments back together.
 
 ### Legacy / Prototype Scripts
-* The scripts `check_mkv_sync.py`, `find_opening_line.py`, `sync_godfather_ad.py`, `render_test_track.py`, and `render_verified_test.py` are deprecated scratch files used during the initial prototyping of the acoustic cross-correlation algorithm. Their logic is fully superseded by `sync_ad_track.py`.
 
 ---
 
@@ -144,8 +143,8 @@ Run PowerShell validation scripts inside `C:\Users\nathan\apps\BatchEncoder-5.1-
 * **Source AD Directory**: `F:\uploads\ad\`
 * **Reference Audio / MKV Directory**: `F:\uploads\`
 * **Synced Output Directory**: `F:\uploads\ad_synced\`
-* **Project Scripts**: `C:\Users\nathan\Projects\AudioDescriptionStuff\scripts\`
-* **Portable FFmpeg Binaries**: `C:\Users\nathan\Projects\AudioDescriptionStuff\bin\` (Place `ffmpeg.exe` and `ffprobe.exe` here. Python scripts will automatically resolve this path dynamically.)
+* **Project Scripts**: `C:\Path\To\AudioDescriptionStuff\scripts\`
+* **Portable FFmpeg Binaries**: `C:\Path\To\AudioDescriptionStuff\bin\` (Place `ffmpeg.exe` and `ffprobe.exe` here. Python scripts will automatically resolve this path dynamically.)
 
 ---
 

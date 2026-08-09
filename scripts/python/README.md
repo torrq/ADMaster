@@ -11,18 +11,14 @@ This directory contains the core automation scripts for the Audio Description sy
 * `build_smart_ad_pipeline.py` - Uses VAD (Voice Activity Detection) on the center channel to preserve narrator speech tails over abrupt scene transitions.
 
 ## Splicing & Rebuilding (Complex Stitching)
-* `build_perfect_tpb.py` - Mathematical stitcher for perfectly aligning an AD track to an MKV that contains commercial gaps.
-* `build_perfect_tpb_clean.py` - Refactored and cleaned-up version of the mathematical stitcher.
+* `build_perfect.py` - Mathematical stitcher for perfectly aligning an AD track to an MKV that contains commercial gaps.
+* `build_perfect_clean.py` - Refactored and cleaned-up version of the mathematical stitcher.
 * `build_safebuffer_stitch.py` - Companion script to stitch the AD track exactly matching the "Safe Buffer" timeline cuts.
-* `build_vad_tpb_clean.py` - VAD rescue script for keyframe-snapped MKV transitions to ensure no speech is lost.
+* `build_vad_clean.py` - VAD rescue script for keyframe-snapped MKV transitions to ensure no speech is lost.
 
 ## Blu-ray & Extended Edition Mapping
 * `parse_mpls.py` - Parses Blu-ray `.mpls` playlist files to extract 45 kHz PTS timestamps for seamless branching mapping.
 * `process_extended_ad_option_a.py` - Reconstructs seamless branching AD tracks by replacing theatrical audio with matching extended scene main audio matrices.
 
 ## Legacy & Prototyping
-* `check_mkv_sync.py` - Legacy script for checking basic MKV audio sync offsets.
-* `find_opening_line.py` - Legacy scratch script for prototyping voice opening line detection.
-* `render_test_track.py` - Legacy scratch script for early cross-correlation tests.
-* `render_verified_test.py` - Legacy script for cross-correlation test rendering.
-* `sync_godfather_ad.py` - Prototyping script specifically created for Godfather AD alignment.
+* `sync_Movie Title_ad.py` - Prototyping script specifically created for Movie Title AD alignment.
