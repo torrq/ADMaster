@@ -1,4 +1,4 @@
-# Python Scripts Index
+# Scripts Index
 
 This directory contains the core automation scripts for the Audio Description sync and processing pipeline.
 

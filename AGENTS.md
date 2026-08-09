@@ -151,4 +151,4 @@ Run PowerShell validation scripts inside `C:\Path\To\BatchEncoder-5.1-x64\` to c
 ## 6. Project Scripts Reference
 The master documentation for all custom Python algorithms and PowerShell pipeline orchestrators has been migrated to dedicated index files. 
 
-Please refer to `scripts/python/README.md` for comprehensive documentation on all script behaviors and edge-case capabilities (e.g. VAD speech rescue, Safe Buffering, Frame-Perfect rendering).
+Please refer to `scripts/README.md` for comprehensive documentation on all script behaviors and edge-case capabilities (e.g. VAD speech rescue, Safe Buffering, Frame-Perfect rendering).

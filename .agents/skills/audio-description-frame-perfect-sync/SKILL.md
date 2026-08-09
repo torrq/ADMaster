@@ -25,7 +25,7 @@ Use FFmpeg's `blackdetect` to find the exact start and end timestamps of the com
 * Example: Black screen detected from `512.400s` to `522.176s` (Duration: `9.776s`).
 
 ### Step 2: Calculate Global Initial AD Offset
-Run `scripts/python/sync_ad_track.py` between the Master MKV and the AD track to find the initial global offset. 
+Run `scripts/sync_ad_track.py` between the Master MKV and the AD track to find the initial global offset. 
 * If Offset = `+17.788s`, trim `17.788s` from the AD track so it aligns with the Master video at `0s`.
 
 ### Step 3: Execute the Frame-Perfect Build

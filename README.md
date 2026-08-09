@@ -15,7 +15,7 @@ Automatically aligns out-of-sync AD tracks (MP3, AC3, etc.) to a reference movie
 
 **Example Usage:**
 ```powershell
-python scripts/python/sync_ad_track.py -r "Movie.eac3" -a "New Description=AD.mp3" -o "out_dir" --preset all
+python scripts/sync_ad_track.py -r "Movie.eac3" -a "New Description=AD.mp3" -o "out_dir" --preset all
 ```
 
 ### 2. Standalone 2-Pass Converter (`convert_ad_2pass.py`)
@@ -24,7 +24,7 @@ It bypasses the sync logic and simply applies the **Standard** and **NightMode**
 
 **Example Usage:**
 ```powershell
-python scripts/python/convert_ad_2pass.py "F:\uploads\Movie\Movie_AD.ac3"
+python scripts/convert_ad_2pass.py "F:\uploads\Movie\Movie_AD.ac3"
 ```
 
 ### 3. Seamless Branching Reconstruction (`build_smart_ad_pipeline.py` & `process_extended_ad_option_a.py`)
@@ -34,7 +34,7 @@ For Blu-rays with multiple cuts (e.g., Theatrical vs Extended), these scripts re
 * Automatically crossfades in the standard 5.1/7.1 audio for inserted scenes where no AD exists.
 
 ### 4. Full Scripts Index
-Please refer to `scripts/python/README.md` for a comprehensive, up-to-date index of all core pipeline, prototyping, and legacy scripts included in this repository.
+Please refer to `scripts/README.md` for a comprehensive, up-to-date index of all core pipeline, prototyping, and legacy scripts included in this repository.
 
 ## Setup & Portability
 This tool is self-contained. 
