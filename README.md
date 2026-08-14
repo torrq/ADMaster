@@ -6,16 +6,25 @@ It is designed to be fully portable on Windows. Simply place `ffmpeg.exe` and `f
 
 ## Core Tools
 
-### 1. Acoustic Cross-Correlation Sync (`sync_ad_track.py`)
-Automatically aligns out-of-sync AD tracks (MP3, AC3, etc.) to a reference movie audio track. 
-* **Fast & Accurate:** Uses multi-point 8kHz PCM cross-correlation to find sub-millisecond delay offsets in under a second.
-* **Smart Corrections:** Automatically detects and reverses PAL (4% speedup) or NTSC pulldown pitch/tempo shifts.
-* **Broadcast Standard Loudness:** Applies a rigorous 2-pass EBU R128 loudness normalization (Standard and NightMode presets) to ensure dialogue is perfectly leveled.
-* **Test Previews:** Multiplexes short 3-minute MKV samples with video so you can visually verify lip-sync before rendering the full movie.
+### 1. Universal Acoustic Sync & Main Audio Conversion (`sync_ad_track.py`)
+Automatically aligns out-of-sync AD tracks (MP3, AC3, M4A, etc.) to a reference movie audio track and optionally converts/downmixes main audio in a single pass.
+* **100-Anchor FFT Cross-Correlation:** Uses dynamic multi-anchor 8kHz PCM FFT cross-correlation in memory to find sub-millisecond delay offsets in seconds.
+* **Candidate Clustering & Runner-Ups:** Groups measurements within a $\pm 30\text{ms}$ sub-frame tolerance to calculate a robust consensus winner and displays up to 2 distinct runner-up offsets with confidence ratings.
+* **Percentage & Raw Confidence:** Reports match confidence both as a clear percentage and normalized peak score (e.g. `88.9% (0.8887)`).
+* **Automatic Working Directory Routing:** Places temporary analysis WAVs in `<movie_dir>/scratch/` (with atomic write protections) and renders final encodes to `<movie_dir>/output/`.
+* **Standard Multi-Track Encoding:**
+  * **AD Tracks:** Outputs both `-AD (Stereo).m4a` (with `alimiter` clipping protection) and `-AD (Night Mode).m4a` (EBU R128 `loudnorm` -16 LUFS).
+  * **Main Audio (`--convert-main`):** Converts 5.1/7.1 sources to `(Surround).ac3` (5.1 384k), `(Stereo).m4a` (downmix + `alimiter`), and `(Night Mode).m4a` (downmix + `loudnorm`).
+* **Smart Pitch & Speed Corrections:** Automatically detects and reverses PAL (4% speedup) or NTSC pulldown tempo shifts.
+* **Test Previews:** Multiplexes short MKV samples with video so you can visually verify lip-sync before rendering the full movie.
 
 **Example Usage:**
 ```powershell
-python scripts/sync_ad_track.py -r "Movie.eac3" -a "New Description=AD.mp3" -o "out_dir" --preset all
+# Full movie sync & main audio conversion in 1 command:
+python scripts/sync_ad_track.py -r "F:\uploads\Movie\source\Movie.dts" -a "F:\uploads\Movie\tosync\Movie_AD.mp3" --convert-main
+
+# Fast 3-minute video lip-sync test:
+python scripts/sync_ad_track.py -r "Movie.eac3" -a "AD.mp3" -m "Movie.mkv" --preview 180
 ```
 
 ### 2. Standalone 2-Pass Converter (`convert_ad_2pass.py`)

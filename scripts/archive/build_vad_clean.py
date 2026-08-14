@@ -5,7 +5,7 @@ import os
 AD_FILE = r"F:\uploads\TPB\tosync\Trailer Park Boys 1x01 Take Your Little Gun and Get Out of My Trailer Park 70143633 2.0 English - Audio Description.mka"
 MASTER_FILE = r"F:\uploads\TPB\source\s01e01 - Take Your Little Gun and Get Out of My Trailer Park (Clean).mkv"
 OUT_FILE = r"F:\uploads\TPB\output\clean_master\TPB_Perfect_Clean_VAD_AD.wav"
-FFMPEG = r"C:\Users\nathan\Projects\AudioDescriptionStuff\bin\ffmpeg.exe"
+FFMPEG = r"bin\ffmpeg.exe"
 SR = 48000
 
 def decode_audio(file):

@@ -4,10 +4,10 @@ import sys
 import wave
 import subprocess
 
-temp_dir = r"C:\Users\nathan\.gemini\antigravity\scratch\smart_martian_temp"
+temp_dir = r"scratch"
 os.makedirs(temp_dir, exist_ok=True)
 
-ffmpeg_bin = r"C:\Users\nathan\AppData\Local\Microsoft\WinGet\Packages\yt-dlp.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-N-125365-g9a01c1cb6a-win64-gpl\bin\ffmpeg.exe"
+ffmpeg_bin = r"path/to/file\Local\Microsoft\WinGet\Packages\yt-dlp.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-N-125365-g9a01c1cb6a-win64-gpl\bin\ffmpeg.exe"
 
 def parse_mpls(filepath):
     with open(filepath, 'rb') as f:

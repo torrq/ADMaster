@@ -4,7 +4,7 @@ import re
 import argparse
 from datetime import timedelta
 
-FFMPEG_PATH = r"C:\Users\nathan\Projects\AudioDescriptionStuff\bin\ffmpeg.exe"
+FFMPEG_PATH = r"bin\ffmpeg.exe"
 MKVMERGE_PATH = r"C:\Program Files\MKVToolNix\mkvmerge.exe"
 
 def format_time(seconds):

@@ -8,8 +8,8 @@ import sys
 SOURCE_DIR = r"F:\uploads\TPBX\source"
 SYNC_DIR = r"F:\uploads\TPBX\tosync"
 OUT_DIR = r"F:\uploads\TPBX\output"
-FFMPEG = r"C:\Users\nathan\Projects\AudioDescriptionStuff\bin\ffmpeg.exe"
-SYNC_SCRIPT = r"C:\Users\nathan\Projects\AudioDescriptionStuff\sync_ad_track.py"
+FFMPEG = r"bin\ffmpeg.exe"
+SYNC_SCRIPT = r"sync_ad_track.py"
 
 os.makedirs(OUT_DIR, exist_ok=True)
 

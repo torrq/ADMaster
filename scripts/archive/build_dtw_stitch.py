@@ -54,7 +54,7 @@ def main():
     print("Filter graph:", graph)
     
     cmd = [
-        "C:\\Users\\nathan\\Projects\\AudioDescriptionStuff\\bin\\ffmpeg.exe", "-y",
+        "bin\\ffmpeg.exe", "-y",
         "-i", input_audio,
         "-filter_complex", graph,
         "-map", "[a_out]",

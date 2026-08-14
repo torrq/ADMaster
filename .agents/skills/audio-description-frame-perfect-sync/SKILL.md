@@ -1,63 +1,123 @@
 ---
 name: audio-description-frame-perfect-sync
-description: Frame-perfect video re-encoding and audio description alignment for removing commercial breaks seamlessly without keyframe snapping or audio jumbling.
+description: Audio description syncing, encoding standards, and commercial removal workflows.
 ---
 
-# Advanced Audio Description Syncing & Commercial Removal
+# Audio Description Syncing & Processing
 
-This skill defines the standard procedures for removing commercial breaks from master MKV files and perfectly syncing uninterrupted TV-rip Audio Description (AD) tracks, ensuring zero loss of show footage and zero narrator cut-offs.
+## Standard Encoding Specs
 
-## 1. The Core Problem: Keyframe Snapping
-When removing commercial black screens from highly compressed H.264/AVC MKV files, standard cutters (like `mkvmerge --split`) are physically incapable of cutting at exact milliseconds. They **snap to video keyframes (I-frames)**.
+| Format | Codec | Bitrate | Notes |
+|--------|-------|---------|-------|
+| Stereo AAC | `aac` | `256k` | Always `-ar 48000`. Use `loudnorm=I=-16:TP=-1.5:LRA=11` for normalized variant. |
+| 5.1 AC3 | `ac3` | `384k` | |
+| Stereo FLAC | `flac` | lossless | For native stereo tracks only (no downmix). |
+| 5.1→Stereo Downmix | `pan=stereo\|c0=c0+0.7071*c2+0.7071*c4\|c1=c1+0.7071*c2+0.7071*c5` | | Apply before `loudnorm`. |
 
-* **The Video Consequence**: `mkvmerge` will inadvertently delete 1-2 seconds of actual show footage adjacent to the commercial break.
-* **The Audio Consequence**: Because show footage is permanently deleted, the synced AD track must be forced to skip that same footage. If the narrator is speaking across the transition, the narrator's sentence will be aggressively chopped in half, or they will end up "talking over themselves" if the audio is overlaid.
+All output files go in an `output/` subdirectory within the project folder.
 
-We have three distinct workflows to solve this, depending on the user's needs.
+**Standard stereo mix convention**: When processing surround main audio alongside AD, always include a normalized stereo AAC downmix of the main track unless the user says otherwise.
 
----
+### Manual FFmpeg Encode Reference
+```powershell
+# Stereo AAC (normalized) from surround source:
+ffmpeg -y -ss <offset> -i "source.dts" -af "aresample=48000,pan=stereo|c0=c0+0.7071*c2+0.7071*c4|c1=c1+0.7071*c2+0.7071*c5,loudnorm=I=-16:TP=-1.5:LRA=11" -ar 48000 -c:a aac -b:a 256k "output.m4a"
 
-## Workflow A: Frame-Perfect FFmpeg Re-encode (The "Director's Cut")
-To achieve a completely seamless, zero-black-screen transition, you **must bypass keyframe snapping** by re-encoding the video stream via FFmpeg using a complex filter graph.
+# 5.1 AC3 from surround source:
+ffmpeg -y -ss <offset> -i "source.dts" -c:a ac3 -b:a 384k "output.ac3"
 
-### Step 1: Detect Commercial Breaks
-Use FFmpeg's `blackdetect` to find the exact start and end timestamps of the commercial black screens.
-* Example: Black screen detected from `512.400s` to `522.176s` (Duration: `9.776s`).
-
-### Step 2: Calculate Global Initial AD Offset
-Run `scripts/sync_ad_track.py` between the Master MKV and the AD track to find the initial global offset. 
-* If Offset = `+17.788s`, trim `17.788s` from the AD track so it aligns with the Master video at `0s`.
-
-### Step 3: Execute the Frame-Perfect Build
-Run a single FFmpeg command with a multi-part `trim`/`atrim` filter graph that precisely preserves the show footage and completely drops the black screens.
-
-```bash
-ffmpeg -y -i original_master.mkv -i ad_track.mka \
-    -filter_complex "[0:v]trim=start=0:end=512.4,setpts=PTS-STARTPTS[v1]; [0:a]atrim=start=0:end=512.4,asetpts=PTS-STARTPTS[a1]; [0:v]trim=start=522.176:end=940.1,setpts=PTS-STARTPTS[v2]; [0:a]atrim=start=522.176:end=940.1,asetpts=PTS-STARTPTS[a2]; [0:v]trim=start=949.777,setpts=PTS-STARTPTS[v3]; [0:a]atrim=start=949.777,asetpts=PTS-STARTPTS[a3]; [v1][a1][v2][a2][v3][a3]concat=n=3:v=1:a=1[v_out][a_out_master]; [1:a]atrim=start=17.788,asetpts=PTS-STARTPTS[a_out_ad]" \
-    -map "[v_out]" -map "[a_out_master]" -map "[a_out_ad]" \
-    -c:v libx264 -preset fast -crf 18 -c:a:0 ac3 -b:a:0 384k -c:a:1 aac -b:a:1 256k -ar:a:1 48000 \
-    final_perfect_sync.mkv
+# Stereo AAC (NOT normalized, e.g. AD from external source):
+ffmpeg -y -ss <offset> -i "source.mp3" -c:a aac -b:a 256k "output.m4a"
 ```
 
----
-
-## Workflow B: The 2-Second "Safe Buffer" (The Fast Method)
-If the user wants instant processing (no video re-encoding) and doesn't mind a brief black screen, use the "Safe Buffer" logic to trick `mkvmerge`.
-
-1. **Shrink the Cut Window**: Take the detected black screen (e.g., `512.212` to `522.355`) and add a 2.0-second safe buffer to both ends (`514.212` to `520.355`).
-2. **Execute `mkvmerge`**: Tell `mkvmerge` to cut out this smaller inner window. When it snaps to keyframes, it will snap to keyframes *still inside the black screen*.
-3. **The Result**: Zero show footage is deleted. The audio never gets jumbled. The transition features a quick ~4-second black screen, and the process takes 3 seconds to complete.
-
----
-
-## Workflow C: VAD Speech Tail Preservation (The Keyframe Rescue)
-If you *must* use `mkvmerge` without a safe buffer (resulting in deleted show footage), you must use Voice Activity Detection (VAD) to rescue the narrator's voice.
-
-1. **Isolate the Missing Audio**: Calculate exactly how much audio was deleted by keyframe snapping (e.g., `2.068s`), and extract that exact chunk from the uninterrupted AD track.
-2. **Center-Channel Extraction**: Collapse that chunk to mono (`(L+R)/2`) to isolate the narrator's voice from the stereo music background.
-3. **Seamless Overlay**: Apply a 50ms fade-out and mathematically mix/overlay this mono chunk directly onto the beginning of the next scene (`next_seg[:mix_len] += gap_overlay[:mix_len]`).
-4. **The Result**: The narrator seamlessly finishes their sentence over the transition cut, without throwing the rest of the timeline out of sync.
-
 ## Critical Rules
-* **Never use mkvmerge for complete commercial removal if seamless audio is required.** `mkvmerge` will always snap to keyframes, breaking audio alignment.
-* **Never use describealign on a keyframe-snapped MKV.** It will cause micro-drifts and incorrectly map audio across the missing show footage.
+
+* **loudnorm 96kHz bug**: `loudnorm` operates internally at 192kHz and will upsample output to 96kHz. ALWAYS append `-ar 48000` after the filter chain.
+* **DTS-HD MA + loudnorm stall**: Feeding lossless DTS-HD MA directly into `loudnorm` causes severe FFmpeg buffer stalls (~0.6x speed). Extract to intermediate WAV/W64 first, then apply `loudnorm` on the intermediate. Use `-f w64` (Wave64) for 5.1+ tracks that exceed the 4GB WAV limit.
+* **MP3 seeking**: Never use `-ss` before `-i` on MP3 files. Decode to WAV first (`-c:a pcm_s24le`), then seek on WAV for sample-exact accuracy.
+* **Raw bitstream seeking**: Placing `-ss` before `-i` on raw `.ac3`/`.thd` bitstreams causes frame boundary misalignment. Place `-ss` after `-i`.
+* **Offset sign convention**:
+  * `offset > 0` (AD behind) → trim start with `-ss <offset>` placed AFTER `-i`.
+  * `offset < 0` (AD ahead) → prepend silence with `adelay=<ms>|<ms>`. Never use `-ss` for negative offsets.
+* **Track ordering**: Main audio = `a:0` (default), AD = `a:1` (visual_impaired disposition).
+
+---
+
+## Workflow 1: Simple Sync (`sync_ad_track.py`)
+
+**When to use**: AD and reference are from the same or very similar release. A single global offset (and optional speed stretch) aligns them across the entire timeline.
+
+```powershell
+# Preview (fast test-listen):
+python sync_ad_track.py -r "reference.eac3" -a "ad_track.mp3" --preview 180
+
+# Full render:
+python sync_ad_track.py -r "reference.eac3" -a "ad_track.mp3" -o "output/" --force-stretch
+```
+
+**How it works**: Computes 10-anchor acoustic cross-correlation at 8kHz mono. Detects sub-millisecond offset and optional PAL/NTSC speed stretch. Renders 2-pass EBU R128 loudnorm AAC.
+
+**Confidence check**: Peaks below `0.1` mean the tracks don't match (different mix, edits, or source). Peaks above `0.3` are reliable.
+
+For tracks from the **same bluray/source** as a previously synced track, reuse the calculated offset — no need to re-correlate.
+
+---
+
+## Workflow 2: DescribeAlign DTW (Complex Edits)
+
+**When to use**: AD and reference have **different edits** — commercial breaks removed, scenes cut/added, or network vs bluray cuts. Cross-correlation fails because no single offset works across the timeline.
+
+**Location**: `describealign.py`
+
+### Command
+```powershell
+python "describealign.py" --yes --stretch_audio <master_video_or_audio> <ad_track>
+```
+
+* `--stretch_audio`: Stretches/compresses the AD to match the master timeline. Keeps original video audio tracks; adds AD as first audio track.
+* `--yes`: **Required for automation.** Skips interactive confirmation prompt that stalls unattended scripts.
+
+### Output
+* `videos_with_ad/ad_<filename>` — MKV/audio with aligned AD track.
+* `alignment_plots/<filename>.txt` — Piecewise alignment map showing offsets, rate changes, and timestamp mappings per segment.
+* `alignment_plots/<filename>.png` — Visual alignment curve plot.
+
+### Track Order Gotcha
+DescribeAlign outputs AD as `a:0` and Main as `a:1` — the **reverse** of our standard. Always remux to swap:
+```powershell
+ffmpeg -y -i "describealign_output.mkv" -map 0:v:0 -map 0:a:1 -map 0:a:0 -c copy ^
+  -metadata:s:a:0 title="Main, Stereo" -disposition:a:0 default ^
+  -metadata:s:a:1 title="AD, Stereo" -disposition:a:1 visual_impaired ^
+  "final_output.mkv"
+```
+
+### Limitations
+* Audio segments stretched >10% introduce audible pitch distortion.
+* Cuts between segments may slice through narrator speech mid-sentence. Use VAD center-channel overlay at cut boundaries if needed.
+* Slower than simple cross-correlation (full DTW feature computation).
+* Creates `videos_with_ad/` and `alignment_plots/` directories — run from `scratch/` or clean up after.
+
+### Integration with batch_orchestrator.py
+`batch_orchestrator.py` automatically selects the right strategy per episode:
+1. **Direct Mux** — single consistent offset, no black screens → simple `-ss` trim + mux.
+2. **Frame-Perfect** — black screens detected and offset count matches → FFmpeg `trim`/`concat` re-encode.
+3. **DTW (describealign)** — no black screens but multiple drifting offsets → dynamic time warp fallback.
+
+---
+
+## Workflow 3: Commercial Break Removal (Frame-Perfect)
+
+**When to use**: Master MKV has black-screen commercial breaks that need removal while preserving frame-exact AD sync.
+
+**The problem**: `mkvmerge --split` snaps to keyframes, deleting 1-2s of show footage and breaking AD alignment.
+
+### Option A: FFmpeg Re-encode (Seamless)
+Use `blackdetect` to find breaks, then a single FFmpeg `trim`/`atrim`/`concat` filter graph to surgically excise them without keyframe snapping. Re-encodes video (`libx264 -preset fast -crf 18`).
+
+### Option B: Safe Buffer (Fast, No Re-encode)
+Shrink the cut window by 2s on each side so `mkvmerge` keyframe snaps stay inside the black screen. Result: ~4s black transition, zero footage loss, instant processing.
+
+### Option C: VAD Speech Rescue (Keyframe Recovery)
+When keyframe snapping deletes footage, extract the missing AD audio chunk, collapse to mono center-channel, and overlay with 50ms fade onto the next scene boundary.
+
+**Rule**: Never use `mkvmerge` for seamless removal. Never use `describealign` on a keyframe-snapped MKV.
