@@ -41,17 +41,28 @@ For encoding specs, FFmpeg rules, and detailed workflow instructions, see the **
 * **Automation gotcha**: `--yes` required (skips interactive prompt that stalls batch scripts).
 * **Cleanup**: Run from `scratch/` directory to contain generated `videos_with_ad/` and `alignment_plots/` junk.
 
+### dtw_smooth_stitch.py (Post-DescribeAlign Transition Smoother)
+Replaces the old hard-cut `build_dtw_stitch.py`. Parses describealign alignment plots and re-stitches AD audio through a **3-layer transition smoothing pipeline**:
+
+1. **Layer 1 — VAD-Aware Cut Nudging**: At each segment boundary, checks RMS energy in 50ms analysis windows. If speech is active at a cut point, the outgoing boundary is extended forward (or incoming pulled backward) to the nearest silence gap. Configurable: `±500ms` search, `200ms` consecutive silence hangover, `0.02` RMS threshold.
+2. **Layer 2 — Zero-Crossing Snapping**: After VAD nudging, each cut point is snapped to the nearest waveform zero crossing within `±2ms` to eliminate DC-offset pops and sub-sample clicks.
+3. **Layer 3 — Equal-Power Crossfade**: At each segment junction, a cosine-shaped equal-power crossfade (`50ms` default) blends outgoing and incoming audio via overlap-add mixing. Satisfies the constant-power identity $\cos^2 + \sin^2 = 1$.
+
+**Standalone usage**: `python dtw_smooth_stitch.py <alignment_plot.txt> <ad_audio> <output.m4a>`
+**Integrated**: `batch_orchestrator.py` automatically imports and calls `run_smooth_stitch()` after describealign produces an alignment plot. Falls back to describealign's raw output if smooth stitching fails.
+
 ### batch_orchestrator.py Strategy Decision Tree
 Automatically selects per episode:
 1. **Direct Mux** — single consistent offset, no black screens.
 2. **Frame-Perfect** — black screens detected and offset count matches gap count.
-3. **DTW (describealign)** — no black screens but multiple drifting offsets.
+3. **DTW (describealign + smooth stitch)** — no black screens but multiple drifting offsets. Runs describealign for alignment, then re-stitches with `dtw_smooth_stitch.py` for clean transitions.
 
 ### Other Scripts
 * `convert_ad_2pass.py`: Standalone 2-pass EBU R128 normalization (no alignment).
 * `parse_mpls.py`: Extracts 45kHz PTS timestamps from Blu-ray `.mpls` playlists.
 * `process_extended_ad_option_a.py`: Seamless branching AD reconstruction with 50ms equal-power crossfades.
 * `build_smart_ad_pipeline.py`: VAD center-channel analysis to prevent narrator speech truncation.
+
 
 See `scripts/README.md` for the full scripts index.
 

@@ -5,7 +5,8 @@ This directory contains the production-ready automation scripts for the Audio De
 ## Core Production Tools
 
 * **`sync_ad_track.py`** - Master universal acoustic sync & encoding tool. Computes 100-anchor in-memory FFT correlation, candidate clustering ($\pm 30\text{ms}$ sub-frame tolerance), dual AD variant rendering (`Stereo` + `Night Mode`), and triple Main audio conversion (`--convert-main`: 5.1 AC3 Surround, 2.0 Stereo AAC, 2.0 Night Mode AAC).
-* **`batch_orchestrator.py`** - Master TV batch orchestrator. Automatically determines the optimal sync strategy (Direct Mux vs Frame-Perfect Black Screen Cuts vs DTW `describealign`) per episode.
+* **`batch_orchestrator.py`** - Master TV batch orchestrator. Automatically determines the optimal sync strategy (Direct Mux vs Frame-Perfect Black Screen Cuts vs DTW `describealign` + smooth stitch) per episode.
+* **`dtw_smooth_stitch.py`** - Smooth DTW audio stitcher with 3-layer transition pipeline: VAD-aware cut nudging (protects speech at boundaries), zero-crossing snapping (eliminates clicks), and equal-power crossfades (smooth blending). Used automatically by `batch_orchestrator.py` or standalone.
 * **`batch_frameperfect.py`** - Automates Frame-Perfect FFmpeg cut workflow across MKV episodes to remove black screen commercial breaks without keyframe snapping.
 * **`remove_commercial_breaks.py`** - Scans MKVs for black screens using FFmpeg `blackdetect` and generates slice timings.
 * **`convert_ad_2pass.py`** - Performs standalone 2-pass EBU R128 Loudnorm normalization on 5.1/7.1 audio tracks without alignment.

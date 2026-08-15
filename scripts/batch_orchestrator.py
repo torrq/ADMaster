@@ -15,7 +15,7 @@ FFMPEG = r"bin\ffmpeg.exe"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SYNC_SCRIPT = os.path.join(SCRIPT_DIR, "sync_ad_track.py")
 FRAMEPERFECT_SCRIPT = os.path.join(SCRIPT_DIR, "batch_frameperfect.py")
-DTW_SCRIPT = os.path.join(SCRIPT_DIR, "build_dtw_stitch.py")
+DTW_SCRIPT = os.path.join(SCRIPT_DIR, "dtw_smooth_stitch.py")
 
 os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -170,45 +170,101 @@ def do_dtw(ep_num, mkv_file, ad_file, dry_run=False):
     if dry_run:
         return
     
-    # Run describealign to generate aligned audio
+    # Run describealign to generate alignment plot + aligned MKV
     describealign_script = r"describealign.py"
     cmd = ["python", describealign_script, "--yes", "--stretch_audio", mkv_file, ad_file]
     
     print(f"[{ep_num}] Running describealign DTW processor (this will take a while)...")
     subprocess.run(cmd, cwd=OUT_DIR)
     
-    # describealign outputs a file in OUT_DIR/videos_with_ad/
+    # describealign outputs both:
+    #   videos_with_ad/ad_<filename>   (aligned MKV — hard cuts, can be harsh)
+    #   alignment_plots/<filename>.txt (piecewise timestamp map)
+    
+    # Look for alignment plot to use our smooth stitcher (preferred path)
     import glob
+    import shutil
+    plot_files = sorted(glob.glob(os.path.join(OUT_DIR, "alignment_plots", "*.txt")))
     aligned_files = glob.glob(os.path.join(OUT_DIR, "videos_with_ad", f"*{os.path.basename(mkv_file)}"))
+    
+    if plot_files:
+        # ── Smooth Stitch Path (3-layer transitions) ──
+        print(f"[{ep_num}] Found alignment plot — applying smooth stitch with VAD transitions...")
+        
+        # Import the smooth stitcher
+        sys.path.insert(0, SCRIPT_DIR)
+        from dtw_smooth_stitch import run_smooth_stitch
+        
+        scratch_dir = os.path.join(OUT_DIR, "scratch")
+        smooth_ad_m4a = os.path.join(scratch_dir, f"ep{ep_num}_smooth_ad.m4a")
+        
+        try:
+            run_smooth_stitch(
+                plot_files[-1],    # Most recent alignment plot
+                ad_file,           # Original AD audio source
+                smooth_ad_m4a,     # Smooth-stitched output
+                scratch_dir=scratch_dir,
+            )
+            
+            # Mux: original video + original main audio + our smooth AD audio
+            temp_file = out_file + ".temp.mkv"
+            mux_cmd = [
+                FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
+                "-i", mkv_file,         # Video + Main audio
+                "-i", smooth_ad_m4a,    # Smooth-stitched AD
+                "-map", "0:v:0",
+                "-map", "0:a:0",        # Main audio
+                "-map", "1:a:0",        # Smooth AD audio
+                "-c", "copy",
+                "-metadata:s:a:0", "title=Main, Stereo", "-metadata:s:a:0", "language=eng",
+                "-disposition:a:0", "default",
+                "-metadata:s:a:1", "title=AD, Stereo", "-metadata:s:a:1", "language=eng",
+                "-disposition:a:1", "visual_impaired",
+                temp_file,
+            ]
+            subprocess.run(mux_cmd, check=True)
+            os.replace(temp_file, out_file)
+            
+            # Clean up describealign's raw output if it exists
+            for f in aligned_files:
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+            
+            print(f"[{ep_num}] Finished DTW Sync (smooth transitions)!")
+            return
+            
+        except Exception as e:
+            print(f"[{ep_num}] WARNING: Smooth stitch failed ({e}), falling back to describealign output...")
+    
+    # ── Fallback: Use describealign's direct output ──
     if not aligned_files:
         print(f"[{ep_num}] ERROR: describealign failed to produce output!")
         return
-        
-    # describealign produces an MKV with the combined audio. Let's just extract that audio and mux it properly.
-    # Actually describealign directly outputs an MKV with the original video and the NEW audio as track 1.
-    # We will just rename their output and use it!
+    
     import shutil
     shutil.move(aligned_files[0], out_file)
     
-    # describealign outputs the NEW AD track as the FIRST audio track (a:0) and the original Main track as the SECOND (a:1).
-    # We need to run a quick remux to physically swap them so Main is first, and apply the correct standard metadata.
+    # describealign outputs AD as a:0, Main as a:1 — swap to our standard order
     temp_file = out_file + ".temp.mkv"
     remux_cmd = [
         FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
         "-i", out_file,
         "-map", "0:v:0",
-        "-map", "0:a:1", # Original Main audio (was track 2) -> now track 1
-        "-map", "0:a:0", # AD audio (was track 1) -> now track 2
+        "-map", "0:a:1",  # Original Main audio (was track 2) -> now track 1
+        "-map", "0:a:0",  # AD audio (was track 1) -> now track 2
         "-c", "copy",
-        "-metadata:s:a:0", "title=Main, Stereo", "-metadata:s:a:0", "language=eng", "-disposition:a:0", "default",
-        "-metadata:s:a:1", "title=AD, Stereo", "-metadata:s:a:1", "language=eng", "-disposition:a:1", "visual_impaired",
-        temp_file
+        "-metadata:s:a:0", "title=Main, Stereo", "-metadata:s:a:0", "language=eng",
+        "-disposition:a:0", "default",
+        "-metadata:s:a:1", "title=AD, Stereo", "-metadata:s:a:1", "language=eng",
+        "-disposition:a:1", "visual_impaired",
+        temp_file,
     ]
     subprocess.run(remux_cmd, check=True)
-    import os
     os.replace(temp_file, out_file)
     
-    print(f"[{ep_num}] Finished DTW Sync!")
+    print(f"[{ep_num}] Finished DTW Sync (describealign fallback)!")
 
 def main():
     parser = argparse.ArgumentParser()

@@ -42,7 +42,25 @@ For Blu-rays with multiple cuts (e.g., Theatrical vs Extended), these scripts re
 * Uses Voice Activity Detection (VAD) via center-channel RMS energy to preserve narrator speech tails that cross scene boundaries.
 * Automatically crossfades in the standard 5.1/7.1 audio for inserted scenes where no AD exists.
 
-### 4. Full Scripts Index
+### 4. DTW Smooth Stitcher (`dtw_smooth_stitch.py`)
+When `describealign` Dynamic Time Warping is used for complex alignment (episodes with commercial edits, scene insertions), the resulting audio splices can sound harsh — cutting mid-word or creating audible clicks at segment transitions.
+
+The smooth stitcher solves this with a **3-layer transition pipeline** applied to describealign's alignment data:
+
+1. **VAD-Aware Cut Nudging** — Detects active speech at each cut boundary using RMS energy analysis. If a cut falls mid-word, it's automatically nudged to the nearest silence gap (±500ms search window, 200ms hangover).
+2. **Zero-Crossing Snapping** — Each cut is micro-adjusted (±2ms) to land on a waveform zero crossing, eliminating DC-offset pops.
+3. **Equal-Power Crossfade** — 50ms cosine-shaped crossfades at every transition ensure smooth blending without volume dips.
+
+**Example Usage:**
+```powershell
+# Standalone (from describealign alignment plot):
+python scripts/dtw_smooth_stitch.py alignment.txt AD_track.mka output.m4a
+
+# Automatic (via batch orchestrator — no extra steps needed):
+python scripts/batch_orchestrator.py
+```
+
+### 5. Full Scripts Index
 Please refer to `scripts/README.md` for a comprehensive, up-to-date index of all core pipeline, prototyping, and legacy scripts included in this repository.
 
 ## Setup & Portability
