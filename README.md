@@ -1,109 +1,152 @@
 <img width="1200" height="275" alt="adsync" src="https://github.com/user-attachments/assets/077d4b0a-5649-40b6-af4c-9e76a175a1cf" />
 
-# adsync — Audio Description & Secondary Audio Sync Pipeline
+# adsync — Universal Audio Description & Secondary Audio Sync Toolkit
 
-This repository contains robust, automated Python scripts for processing, synchronizing, and loudness-normalizing Audio Description (AD) tracks for movies and TV shows.
+**adsync** is a high-performance, automated Python toolkit for synchronizing, downmixing, loudness-normalizing, and packaging Audio Description (AD) and secondary commentary tracks for movies and television series.
 
-It is designed to be fully portable on Windows. Simply place `ffmpeg.exe` and `ffprobe.exe` in the `bin/` directory, and the scripts will automatically use them without requiring a system-wide installation.
-
-## Core Tools
-
-### 1. Universal Acoustic Sync & Main Audio Conversion (`sync_ad_track.py`)
-Automatically aligns out-of-sync AD tracks (MP3, AC3, M4A, etc.) to a reference movie audio track and optionally converts/downmixes main audio in a single pass.
-* **Directory Auto-Discovery:** Point to any folder containing `source/` (reference MKV/audio) and `tosync/` (AD MP3s/M4As), and the tool automatically pairs, analyzes, and renders deliverables to `output/`.
-* **100-Anchor FFT Cross-Correlation:** Uses dynamic multi-anchor 8kHz PCM FFT cross-correlation in memory to find sub-millisecond delay offsets in seconds.
-* **DescribeAlign DTW Integration:** Automatically triggers or forces (`--force-dtw`) Dynamic Time Warping piecewise alignment for alternate cuts with 3-layer smoothing (VAD + Zero-Crossing + 50ms Crossfade) and bit-perfect PCM passthrough.
-* **Stream Selection (`--ref-stream`):** Choose specific audio tracks from multi-track MKVs (e.g. `--ref-stream 0:a:1`).
-* **Dynamic Sample-Rate PAL Handling (`--pal` / `--no-pal`):** Computes exact `asetrate` sample clock manipulation based on probed input sample rates (44.1k vs 48k). Use `--no-pal` to enforce native 1.0x speed on shorter Theatrical Cuts.
-* **Standard Multi-Track Encoding:**
-  * **AD Tracks:** Outputs both `-AD (Stereo).m4a` (with `alimiter` clipping protection) and `-AD (Night Mode).m4a` (EBU R128 `loudnorm` -16 LUFS).
-  * **Main Audio (`--convert-main`):** Converts 5.1/7.1 sources to `(Surround).ac3` (5.1 640k), `(Stereo).m4a` (true 2.0 downmix via ITU-R BS.775 matrix + `alimiter`), and `(Night Mode).m4a` (true 2.0 downmix + `loudnorm`).
-* **Test Previews:** Multiplexes short MKV samples with video so you can visually verify lip-sync before rendering the full movie.
-
-**Example Usage:**
-```powershell
-# 1. Directory Auto-Discovery (AD sync + Main 5.1 & True 2.0 AAC conversion):
-python scripts/sync_ad_track.py "F:\uploads\queue\Movie1" --convert-main
-
-# 2. Specific audio stream with forced DTW alignment (e.g. Theatrical vs Extended Cut):
-python scripts/sync_ad_track.py "F:\uploads\queue\Movie2" --ref-stream 0:a:1 --force-dtw --no-pal
-
-# 3. Fast 3-minute video lip-sync test:
-python scripts/sync_ad_track.py "F:\uploads\queue\Movie1" --preview 180
-```
-
-### 2. Standalone 2-Pass Converter (`convert_ad_2pass.py`)
-A fast utility to convert standard 5.1/7.1 AD tracks (such as raw Blu-ray AC3/DTS/TrueHD) into stereo AAC using broadcast-standard 2-pass loudness normalization. 
-It bypasses the sync logic and simply applies the **Standard** and **NightMode** EBU R128 profiles.
-
-**Example Usage:**
-```powershell
-python scripts/convert_ad_2pass.py "F:\uploads\Movie\Movie_AD.ac3"
-```
-
-### 3. Extended Cuts & Seamless Branching Alignment
-For releases with multiple cuts (e.g., Theatrical vs Extended), use `sync_ad_track.py --force-dtw` to automatically bridge scene insertions and trims using Dynamic Time Warping and 3-layer smooth stitching. For manual playlist timestamp extraction from Blu-ray discs, use `parse_mpls.py`.
-
-### 4. DTW Smooth Stitcher (`dtw_smooth_stitch.py`)
-When `describealign` Dynamic Time Warping is used for complex alignment (episodes with commercial edits, scene insertions, or rate-stretched cuts), the smooth stitcher applies a **3-layer transition pipeline** to describealign's alignment data:
-
-1. **VAD-Aware Cut Nudging** — Detects active speech at each cut boundary using RMS energy analysis. If a cut falls mid-word, it's automatically nudged to the nearest silence gap (±500ms search window, 200ms hangover).
-2. **Zero-Crossing Snapping** — Each cut is micro-adjusted (±2ms) to land on a waveform zero crossing, eliminating DC-offset pops.
-3. **Equal-Power Crossfade & Sinc Rate Resampling** — Preserves 100% bit-perfect native PCM samples without interpolation for standard-speed audio, applies bandlimited sinc resampling (`scipy.signal.resample`) for genuine rate-stretch segments (e.g. PAL $\to$ Film), and blends segment junctions using 50ms cosine-shaped constant-power crossfades ($\cos^2 + \sin^2 = 1$).
-
-### 5. Piecewise Reel-Aware Synchronization (35mm Film Scans)
-For archival 35mm film scans where physical reel changes (every ~20 minutes) have missing or damaged frames:
-* Identifies discrete offset clusters across the film using sub-millisecond FFT cross-correlation.
-* Preserves **100% native speed (1.000000x) and pitch** across every individual reel without artificial time-stretching.
-* Finds natural silence gaps at scene transitions near reel changes and applies equal-power cosine crossfades.
+It provides sub-millisecond acoustic cross-correlation, dynamic Dynamic Time Warping (DTW) piecewise alignment with 3-layer transition smoothing, frame-accurate black-screen commercial break excision, broadcast-standard ITU-R BS.775 2.0 stereo downmixing, in-place Matroska flag management, and Plex Media Server collection integration.
 
 ---
 
-## Alignment Strategy: Anchor Correlation vs. DescribeAlign DTW
+## Production Scripts Index
 
-Both alignment methods serve complementary purposes depending on release characteristics:
+All scripts are located in [`scripts/`](scripts/) and can be run standalone or chained in automated batch workflows:
+
+| Script | Purpose | When to Use |
+| :--- | :--- | :--- |
+| **[`sync_ad_track.py`](scripts/README.md#1-sync_ad_trackpy-master-sync--encoder)** | **Master Movie Sync & Encoder** | Aligning AD tracks to movies, queue batch processing, dynamic PAL conversion, 5.1/2.0 deliverable rendering. |
+| **[`batch_orchestrator.py`](scripts/README.md#2-batch_orchestratorpy-tv-season-orchestrator)** | **TV Season Router** | Processing entire TV seasons with automatic strategy selection (Direct Mux, Frame-Perfect Cut, DTW). |
+| **[`dtw_smooth_stitch.py`](scripts/README.md#3-dtw_smooth_stitchpy-dtw-transition-smoother)** | **3-Layer DTW Smoother** | Re-stitching DescribeAlign alignment maps with VAD cut nudging, zero-crossing snapping, and 50ms crossfades. |
+| **[`batch_frameperfect.py`](scripts/README.md#4-batch_frameperfectpy-commercial-break-cutter)** | **Commercial Break Cutter** | Surgically cutting black screen commercial gaps from video streams without keyframe snapping. |
+| **[`remove_commercial_breaks.py`](scripts/README.md#5-remove_commercial_breakspy-break-detector)** | **Break Scanner** | Detecting simultaneous video black and audio silence intervals to output exact cut timestamps. |
+| **[`convert_main_tracks.py`](scripts/README.md#6-convert_main_trackspy-master-audio-converter)** | **Master Audio Downmixer** | Extracting and downmixing 5.1/7.1 masters into true 2.0 Stereo (`alimiter`) and Night Mode (`loudnorm`). |
+| **[`convert_ad_2pass.py`](scripts/README.md#7-convert_ad_2passpy-2-pass-loudness-normalizer)** | **2-Pass Loudness Normalizer** | Applying broadcast EBU R128 loudness normalization directly to standalone audio tracks. |
+| **[`set_commentary_flags.py`](scripts/README.md#8-set_commentary_flagspy-in-place-mkv-tagger)** | **In-Place MKV Tagger** | Tagging commentary and director audio tracks with `flag-commentary=1` in ~10ms via `mkvpropedit`. |
+| **[`plex_ad_commentary_collections.py`](scripts/README.md#9-plex_ad_commentary_collectionspy-plex-sync)** | **Plex Server Integration** | Automatically creating and maintaining smart Plex collections for AD and commentary media. |
+| **[`parse_mpls.py`](scripts/README.md#10-parse_mplspy-blu-ray-playlist-parser)** | **Blu-ray Playlist Parser** | Extracting 45 kHz PTS PlayItem timestamps directly from retail Blu-ray `.mpls` playlist files. |
+
+*(For detailed CLI flags and parameter options for each script, refer to [`scripts/README.md`](scripts/README.md))*
+
+---
+
+## Quick Start & Common Workflows
+
+### 1. Movie Directory Auto-Discovery (Acoustic Correlation + Deliverables)
+Drop the reference video or audio file into `source/` and all candidate AD tracks into `tosync/`:
+```powershell
+# Automatically discovers files, computes 100-anchor offset, renders dual AD and triple Main audio:
+python scripts/sync_ad_track.py "F:\uploads\queue\Movie1" --convert-main
+```
+
+### 2. Batch Processing a Full Queue Directory
+Process an entire directory containing dozens of movie folders sequentially:
+```powershell
+python scripts/sync_ad_track.py "F:\uploads\queue" --batch --convert-main
+```
+
+### 3. Forced DTW Alignment for Alternate Cuts
+When syncing an AD track from a Theatrical Cut onto an Extended Cut Blu-ray:
+```powershell
+python scripts/sync_ad_track.py "F:\uploads\queue\Movie2" --force-dtw --no-pal
+```
+
+### 4. Fast 3-Minute Video Test Preview
+Multiplexes a 3-minute video sample to verify lip-sync before processing a full feature:
+```powershell
+python scripts/sync_ad_track.py "F:\uploads\queue\Movie1" --preview 180
+```
+
+### 5. Tagging Commentary Tracks Across a TV Show or Movie Library
+Scans MKV headers with `mkvmerge -J` and sets `flag-commentary=1` in-place without remuxing:
+```powershell
+python scripts/set_commentary_flags.py "X:\video\TV\Show_Title"
+```
+
+---
+
+## Alignment Strategies: Anchor Correlation vs. DescribeAlign DTW
 
 | Feature / Metric | 100-Anchor Cross-Correlation (Default) | DescribeAlign Dynamic Time Warping (DTW) |
 | :--- | :--- | :--- |
-| **Best Used For** | Identical cuts (same edit, different audio delay/master). | Alternate cuts (Theatrical vs Extended, TV trims, commercials). |
-| **Audio Integrity** | **100% Bit-Perfect Linear Passthrough:** Shifts the track as one continuous stream. Zero splicing, zero pitch/tempo warps. | **Piecewise Reconstruction:** Slices into segments, stretches/compresses intervals, and crossfades boundaries. |
+| **Best Used For** | Identical cuts (same edit, different audio delay or master). | Alternate cuts (Theatrical vs Extended, TV trims, commercials). |
+| **Audio Integrity** | **100% Bit-Perfect Linear Passthrough:** Preserves decoded PCM samples bit-for-bit. Zero pitch/tempo warping. | **Piecewise Reconstruction:** Slices into discrete segments and crossfades transitions. |
 | **Precision** | Sub-millisecond sample accuracy ($\pm 1\text{ms}$). | Quantized time step windows (~100ms resolution). |
 | **Execution Time** | **~2–4 seconds** via in-memory 8kHz FFT arrays. | **1–3 minutes** per track (feature extraction + LP optimization). |
 | **Diagnostic Role** | Consensus score immediately validates whether cuts match ($\ge 50\%$) or differ ($< 10\%$). | Engages automatically when anchor score confirms cut mismatch. |
 
-### When to Use Which:
-* **Use Anchor Method (Default):** Always try first for standard releases. It provides instantaneous sync without altering the acoustic timbre, pitch, or dynamics of the narrator's track.
-* **Use DescribeAlign (`--force-dtw`):** Use when syncing an AD track from an alternate edition (e.g. aligning a Theatrical Cut AD track onto an Extended Cut Blu-ray). DescribeAlign navigates scene insertions and trims, while `dtw_smooth_stitch.py` ensures transparent transitions.
+---
+
+## Audio Encoding & Downmixing Standards
+
+All stereo deliverables generated by this toolkit adhere strictly to international broadcast specifications:
+
+1. **ITU-R BS.775 True 2.0 Downmix Matrix**:
+   Surround audio tracks ($\ge 6$ channels) are folded down using the ITU standard formula with centered dialogue:
+   $$\text{Left} = L + 0.7071 \times C + 0.7071 \times L_s$$
+   $$\text{Right} = R + 0.7071 \times C + 0.7071 \times R_s$$
+2. **True 2.0 Stereo Deliverable**:
+   Applies the BS.775 matrix followed by `alimiter` clipping protection (`level_in=1:level_out=0.98:limit=0.98`) to preserve the natural dynamic range of theatrical mixes.
+3. **True 2.0 Night Mode Deliverable**:
+   Applies the BS.775 matrix followed by broadcast-standard EBU R128 loudness normalization (`loudnorm=I=-16:TP=-1.5:LRA=11`) with centered vocal clarity for nighttime or headphone listening.
+4. **Resampling Fidelity**:
+   Enforces bandlimited sinc/Fourier resampling (`scipy.signal.resample` / `soxr`) for genuine rate conversions (e.g. PAL 4.27% slowdowns) and bit-perfect passthrough for native 1.0x streams.
 
 ---
 
-### 6. Full Scripts Index
-Please refer to `scripts/README.md` for a comprehensive, up-to-date index of all core pipeline, prototyping, and legacy scripts included in this repository.
+## Configuration & Local Overrides
 
-## Setup & Portability
-This tool is self-contained and requires zero hardcoded paths. 
-1. Create a `bin/` folder in this directory and drop `ffmpeg.exe` and `ffprobe.exe` inside (or ensure they are on your system `PATH`).
-2. Run the scripts using Python 3.x with `numpy` and `scipy` installed.
+This toolkit is fully portable and requires zero hardcoded paths. 
 
-### Optional Local Configuration (`config.local.json`)
-You can customize binary paths, default threads, and targets without modifying scripts:
-1. Copy `config.default.json` to `config.local.json` (which is `.gitignore`d).
-2. Override any paths or defaults:
-```json
+To configure custom binary paths, encoding threads, or loudness targets:
+1. Copy [`config.default.json`](config.default.json) to `config.local.json` or `config.json` (which are ignored by `.gitignore`).
+2. Customize your settings (comments using `//` or `/* */` are supported):
+
+```jsonc
 {
-  "ffmpeg_path": "C:\\Tools\\ffmpeg\\ffmpeg.exe",
-  "ffprobe_path": "C:\\Tools\\ffmpeg\\ffprobe.exe",
-  "describealign_path": "C:\\Tools\\describealign\\describealign.py",
-  "default_threads": 4,
+  // Path to custom FFmpeg binary (leave empty to auto-discover in ./bin/ or PATH)
+  "ffmpeg_path": "",
+
+  // Path to custom FFprobe binary
+  "ffprobe_path": "",
+
+  // Path to describealign.py script for DTW alignment
+  "describealign_path": "",
+
+  // CPU threads for FFmpeg encoding
+  "default_threads": 2,
+
+  // Default target EBU R128 loudness (LUFS)
   "default_target_i": -16.0,
-  "default_target_tp": -1.5
+
+  // Default target True Peak ceiling (dB)
+  "default_target_tp": -1.5,
+
+  // Correlation anchors sampled across timeline
+  "default_anchors": 100
 }
 ```
 
+---
+
+## Setup & Requirements
+
+1. **Python**: Python 3.9+ with `numpy` and `scipy` installed:
+   ```powershell
+   pip install numpy scipy
+   ```
+2. **Binaries**: Place `ffmpeg.exe` and `ffprobe.exe` inside a `bin/` folder in the project root, or ensure they are available in your system `PATH`.
+3. **MKV Tools**: For commentary flagging and metadata inspection, install [MKVToolNix](https://mkvtoolnix.download/).
+
+---
+
 ## BatchEncoder Integration
-For GUI-based bulk processing, this project pairs excellently with **BatchEncoder**. We maintain a custom `FFMPEG_BLURAY_AAC.xml` format preset that replicates these exact downmix and loudness matrices (via a 1-pass approximation) directly inside the BatchEncoder UI.
+
+For GUI-based bulk processing, this project pairs excellently with **BatchEncoder**. We maintain a custom `FFMPEG_BLURAY_AAC.xml` format preset that replicates these exact downmix and loudness matrices (via a 1-pass approximation) directly inside the BatchEncoder GUI.
+
+---
 
 ## License
+
 This project and all included scripts are open-source and licensed under the [MIT License](LICENSE).
 
-*(For detailed architectural rules, LLM-agent instructions, and pipeline limitations, refer to `AGENTS.md`)*
+*(For detailed architectural rules, LLM-agent instructions, and pipeline limitations, refer to [`AGENTS.md`](AGENTS.md))*

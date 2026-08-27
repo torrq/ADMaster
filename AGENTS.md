@@ -115,7 +115,7 @@ See `scripts/README.md` for the full scripts index.
 
 ### 4. ChapterDB Cut Verification
 * Community submissions on ChapterDB frequently paste Extended Edition chapter titles over Theatrical disc timestamps (or vice versa).
-* Always verify chapter counts against official DVD/Blu-ray inserts (e.g. FOTR Theatrical = 40 chapters, TTT Theatrical = 53 chapters, ROTK Theatrical = 60 chapters).
+* Always verify chapter counts against official DVD/Blu-ray inserts (e.g. Movie 1 Theatrical = 40 chapters, Movie 2 Theatrical = 53 chapters, Movie 3 Theatrical = 60 chapters).
 
 ### 5. Strict 2.0 Stereo Downmixing for Surround Sources
 * **Pitfall**: When extracting a 5.1/7.1 master track (`channels >= 6`), passing `-af "alimiter=..."` or `-af "loudnorm=..."` without an explicit downmix pan filter and `-ac 2` will cause FFmpeg to retain all 6 channels, producing a 5.1-channel AAC stream instead of 2.0 stereo.
