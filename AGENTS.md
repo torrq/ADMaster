@@ -32,6 +32,7 @@ For encoding specs, FFmpeg rules, and detailed workflow instructions, see the **
 * **Strict 2.0 Downmix Matrix**: Enforces ITU-R BS.775 matrix (`pan=stereo|c0=c0+0.7071*c2+0.7071*c4|c1=c1+0.7071*c2+0.7071*c5`), `-ac 2`, and `-ar 48000` for all stereo and night mode deliverables.
 * **Automatic Directory Routing**: Automatically sets `<movie_dir>/output/` for final encodes and `<movie_dir>/scratch/` for temporary analysis files.
 * **Intermediate PCM WAV Rendering**: Decompresses and downmixes surround master audio and synchronized AD audio into clean 48kHz WAVs in `scratch/` once before rendering stereo variants. Eliminates redundant DTS/TrueHD decodes, accelerates `loudnorm` by 2–3x, and eliminates FFmpeg filter buffer stalls.
+* **Local Machine Configuration**: Automatically reads custom paths (`ffmpeg_path`, `ffprobe_path`, `describealign_path`) and default preferences (`default_threads`, `default_target_i`, `default_anchors`) from `config.local.json` or `config.json` (falling back to `config.default.json`).
 * **Thread Throttling (`--threads`)**: Enforces FFmpeg concurrency limit (default: `2` threads) to keep host systems responsive during heavy multi-track processing.
 * **Atomic Pre-Decoding**: Uses temporary files (`_tmp.wav`) and atomic `os.replace` to prevent corrupted/half-written cache files from cancelled tasks.
 * **Standard Audio Variants**:
