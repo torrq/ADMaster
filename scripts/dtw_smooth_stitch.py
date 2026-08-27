@@ -38,7 +38,6 @@ import sys
 import os
 import re
 import wave
-import struct
 import subprocess
 import argparse
 import shutil
@@ -199,61 +198,7 @@ def write_wav(samples, sr, output_path):
         wf.writeframes(pcm.tobytes())
 
 
-def wsola_time_stretch(audio_samples, sr, target_samples, ffmpeg_bin=None):
-    """
-    Pitch-corrected time-stretching using WSOLA (FFmpeg atempo filter).
-    Preserves natural voice pitch and timbre while stretching or shrinking duration.
-    """
-    if len(audio_samples) == 0 or target_samples <= 0 or len(audio_samples) == target_samples:
-        return audio_samples
-    
-    tempo = float(len(audio_samples)) / float(target_samples)
-    if abs(tempo - 1.0) < 0.002:
-        return audio_samples
-        
-    if ffmpeg_bin is None:
-        ffmpeg_bin = find_ffmpeg()
-        
-    # Build atempo filter chain (atempo accepts values in [0.5, 2.0])
-    filters = []
-    curr = tempo
-    while curr < 0.5:
-        filters.append("atempo=0.5")
-        curr /= 0.5
-    while curr > 2.0:
-        filters.append("atempo=2.0")
-        curr /= 2.0
-    filters.append(f"atempo={curr:.6f}")
-    filter_str = ",".join(filters)
-    
-    raw_in = (np.clip(audio_samples, -1.0, 1.0) * 32767).astype(np.int16)
-    channels = audio_samples.shape[1] if audio_samples.ndim > 1 else 1
-    
-    cmd = [
-        ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
-        "-f", "s16le", "-ar", str(sr), "-ac", str(channels), "-i", "pipe:0",
-        "-af", filter_str,
-        "-f", "s16le", "-ar", str(sr), "-ac", str(channels), "pipe:1"
-    ]
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    out_bytes, _ = proc.communicate(input=raw_in.tobytes())
-    
-    if len(out_bytes) == 0:
-        return audio_samples
-        
-    out_arr = np.frombuffer(out_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-    if channels > 1:
-        out_arr = out_arr.reshape(-1, channels)
-        
-    # Align to target samples
-    if len(out_arr) > target_samples:
-        out_arr = out_arr[:target_samples]
-    elif len(out_arr) < target_samples:
-        diff = target_samples - len(out_arr)
-        pad = np.zeros((diff, channels) if channels > 1 else (diff,), dtype=np.float32)
-        out_arr = np.vstack([out_arr, pad]) if channels > 1 else np.concatenate([out_arr, pad])
-        
-    return out_arr
+
 
 
 # --- Layer 1: VAD-Aware Cut Nudging ------------------------------------------
