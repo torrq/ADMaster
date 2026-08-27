@@ -1,9 +1,32 @@
 {
+  // ===========================================================================
+  // adsync - Default Configuration Template
+  // ===========================================================================
+  // Copy this file to "config.local.json" or "config.json" to customize settings
+  // for your local system. (config.local.json and config.json are gitignored).
+  // ===========================================================================
+
+  // Path to custom FFmpeg executable.
+  // Leave empty ("") to automatically discover in ./bin/ or system PATH.
   "ffmpeg_path": "",
+
+  // Path to custom FFprobe executable.
+  // Leave empty ("") to automatically discover alongside FFmpeg or in system PATH.
   "ffprobe_path": "",
+
+  // Path to describealign.py script for Dynamic Time Warping (DTW) piecewise alignment.
+  // Leave empty ("") to automatically resolve from sibling directories or PATH.
   "describealign_path": "",
+
+  // Default number of CPU threads allocated for FFmpeg encoding operations (Default: 2).
   "default_threads": 2,
+
+  // Default target EBU R128 integrated loudness in LUFS for Night Mode tracks (Default: -16.0).
   "default_target_i": -16.0,
+
+  // Default target True Peak ceiling in dB for Night Mode tracks (Default: -1.5).
   "default_target_tp": -1.5,
+
+  // Default number of correlation analysis anchors sampled across the timeline (Default: 100).
   "default_anchors": 100
 }

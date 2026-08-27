@@ -52,7 +52,7 @@ except ImportError:
         return np.correlate(a, b, mode=mode)
 
 def load_config():
-    """Loads configuration from config.local.json, config.json, or config.default.json."""
+    """Loads configuration from config.local.json, config.json, or config.default.json, stripping comments."""
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     candidates = [
         os.path.join(base_dir, "config.local.json"),
@@ -63,7 +63,11 @@ def load_config():
         if os.path.exists(c):
             try:
                 with open(c, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    content = f.read()
+                    # Strip // single-line comments and /* */ multi-line comments
+                    content_clean = re.sub(r'//.*', '', content)
+                    content_clean = re.sub(r'/\*.*?\*/', '', content_clean, flags=re.DOTALL)
+                    return json.loads(content_clean)
             except Exception:
                 pass
     return {}
