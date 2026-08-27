@@ -75,12 +75,14 @@ Automatically selects per episode:
 3. **DTW (describealign + smooth stitch)** — no black screens but multiple drifting offsets. Runs describealign for alignment, then re-stitches with `dtw_smooth_stitch.py` for clean transitions.
 4. **Piecewise Reel Sync** — 35mm scans with discrete reel jumps; keeps 1.0x native playback speed and splices at silence.
 
-### Other Scripts
-* `convert_ad_2pass.py`: Standalone 2-pass EBU R128 normalization (no alignment).
+### Other Core Scripts
+* `convert_main_tracks.py`: Extract & downmix 5.1/7.1 surround masters to true 2.0 Stereo AAC and Night Mode AAC.
+* `convert_ad_2pass.py`: Standalone 2-pass EBU R128 loudness normalization on existing audio files.
+* `set_commentary_flags.py`: Batch flag audio tracks matching commentary keywords using `mkvpropedit`.
+* `plex_ad_commentary_collections.py`: Maintain static Plex collections for AD and Commentary tracks.
+* `batch_frameperfect.py`: Remove black screen commercial gaps with exact cut points.
+* `remove_commercial_breaks.py`: Black screen and silence detector for video containers.
 * `parse_mpls.py`: Extracts 45kHz PTS timestamps from Blu-ray `.mpls` playlists.
-* `process_extended_ad_option_a.py`: Seamless branching AD reconstruction with 50ms equal-power crossfades.
-* `build_smart_ad_pipeline.py`: VAD center-channel analysis to prevent narrator speech truncation.
-
 
 See `scripts/README.md` for the full scripts index.
 

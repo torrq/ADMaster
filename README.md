@@ -41,11 +41,8 @@ It bypasses the sync logic and simply applies the **Standard** and **NightMode**
 python scripts/convert_ad_2pass.py "F:\uploads\Movie\Movie_AD.ac3"
 ```
 
-### 3. Seamless Branching Reconstruction (`build_smart_ad_pipeline.py` & `process_extended_ad_option_a.py`)
-For Blu-rays with multiple cuts (e.g., Theatrical vs Extended), these scripts rebuild AD tracks to match the Extended cut using the Theatrical AD track as a base.
-* Parses Blu-ray `.mpls` files (`parse_mpls.py`) to align PlayItem PTS timestamps.
-* Uses Voice Activity Detection (VAD) via center-channel RMS energy to preserve narrator speech tails that cross scene boundaries.
-* Automatically crossfades in the standard 5.1/7.1 audio for inserted scenes where no AD exists.
+### 3. Extended Cuts & Seamless Branching Alignment
+For releases with multiple cuts (e.g., Theatrical vs Extended), use `sync_ad_track.py --force-dtw` to automatically bridge scene insertions and trims using Dynamic Time Warping and 3-layer smooth stitching. For manual playlist timestamp extraction from Blu-ray discs, use `parse_mpls.py`.
 
 ### 4. DTW Smooth Stitcher (`dtw_smooth_stitch.py`)
 When `describealign` Dynamic Time Warping is used for complex alignment (episodes with commercial edits, scene insertions, or rate-stretched cuts), the smooth stitcher applies a **3-layer transition pipeline** to describealign's alignment data:
