@@ -33,6 +33,7 @@ Master tool for synchronizing external Audio Description tracks to reference med
 * **Dynamic Sample-Rate PAL Clock Math (`--pal` / `--no-pal`)**: Probes input sample rates (44.1k vs 48k) to calculate exact resampling ratios for PAL 25fps slowdowns:
   $$\text{asetrate} = \text{input\_sr} \times \frac{23.976024}{25.0}$$
 * **Strict ITU-R BS.775 2.0 Downmixing**: Enforces standard downmix matrix (`pan=stereo|c0=c0+0.7071*c2+0.7071*c4|c1=c1+0.7071*c2+0.7071*c5`), `-ac 2`, and `-ar 48000`.
+* **Overwrite Protection (`--overwrite` / `-f` / `--force-overwrite`)**: Prevents re-rendering deliverables that already exist in `output/` by default, saving CPU and time during queue re-runs.
 * **Local Machine Config Support**: Loads settings and paths from `config.local.json` or `config.json` (falls back to `config.default.json`).
 
 ### Common Commands:
@@ -43,10 +44,13 @@ python scripts/sync_ad_track.py "F:\uploads\queue\Movie1" --convert-main
 # 2. Batch process all movie folders in a queue:
 python scripts/sync_ad_track.py "F:\uploads\queue" --batch --convert-main
 
-# 3. Explicit files with stream selection and forced DTW:
+# 3. Force re-analyzing and overwriting existing deliverables:
+python scripts/sync_ad_track.py "F:\uploads\queue\Movie1" --convert-main --overwrite
+
+# 4. Explicit files with stream selection and forced DTW:
 python scripts/sync_ad_track.py -r "F:\media\Movie2.mkv" --ref-stream 0:a:1 -a "F:\media\Movie2_AD.mp3" --force-dtw --no-pal
 
-# 4. Fast 3-minute video sync test preview:
+# 5. Fast 3-minute video sync test preview:
 python scripts/sync_ad_track.py "F:\uploads\queue\Movie1" --preview 180 -m "F:\uploads\queue\Movie1\source\Movie1.mkv"
 ```
 

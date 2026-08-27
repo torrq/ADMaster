@@ -70,52 +70,67 @@ def sanitize_title(filename):
     return base.replace(".", " ").replace("_", " ").strip()
 
 
-def convert_track(ffmpeg_bin, ffprobe_bin, input_path, base_title, out_dir, scratch_dir, threads=2, preview_sec=None):
-    os.makedirs(out_dir, exist_ok=True)
-    os.makedirs(scratch_dir, exist_ok=True)
-    
-    duration, channels = get_audio_info(ffprobe_bin, input_path)
-    dur_str = f"{duration:.2f}s ({duration/3600.0:.2f}h)" if duration > 0 else "Unknown / Stream Bitstream"
-    
+def convert_track(ffmpeg_bin, ffprobe_bin, input_path, base_title, out_dir, scratch_dir, threads=2, preview_sec=None, overwrite=False):
+    """Processes a single multi-channel track into Surround AC3, Stereo AAC, and Night Mode AAC."""
     print(f"\n================================================================================")
-    print(f"Input File   : {input_path}")
-    print(f"Title Prefix : {base_title}")
-    print(f"Channels     : {channels} channels | Duration: {dur_str}")
-    print(f"Output Dir   : {out_dir}")
-    print(f"Scratch Dir  : {scratch_dir}")
-    print(f"Threads      : {threads}")
+    print(f"Processing Track : {input_path}")
+    print(f"Title Prefix     : {base_title}")
+    print(f"Output Dir       : {out_dir}")
+    print(f"Scratch Dir      : {scratch_dir}")
+    print(f"Threads          : {threads}")
+    print(f"Overwrite Mode   : {'ENABLED (--overwrite)' if overwrite else 'DISABLED (preserve existing files)'}")
     print(f"================================================================================")
     
     suffix = f" (Preview {int(preview_sec)}s)" if preview_sec else ""
     pan_stereo = "pan=stereo|c0=c0+0.7071*c2+0.7071*c4|c1=c1+0.7071*c2+0.7071*c5"
     
+    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(scratch_dir, exist_ok=True)
+    
+    _, channels = get_audio_info(ffprobe_bin, input_path)
+    
+    out_surround = os.path.join(out_dir, f"{base_title} (Surround){suffix}.ac3") if channels >= 6 else None
+    out_stereo = os.path.join(out_dir, f"{base_title} (Stereo){suffix}.m4a")
+    out_night = os.path.join(out_dir, f"{base_title} (Night Mode){suffix}.m4a")
+
     # 1. 5.1 Surround AC3 (if 6+ channels)
     if channels >= 6:
-        out_surround = os.path.join(out_dir, f"{base_title} (Surround){suffix}.ac3")
-        print(f"\n  [1/3] Encoding 5.1 Surround AC3 (640k)...", flush=True)
-        cmd_surround = [ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "warning", "-threads", str(threads), "-i", input_path]
-        if preview_sec:
-            cmd_surround.extend(["-t", f"{preview_sec:.3f}"])
-        cmd_surround.extend(["-c:a", "ac3", "-b:a", "640k", out_surround])
-        res_surr = subprocess.run(cmd_surround, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if res_surr.returncode == 0 and os.path.exists(out_surround):
-            size_mb = os.path.getsize(out_surround) / (1024 * 1024)
-            print(f"  [SUCCESS] Saved Surround AC3: {out_surround} ({size_mb:.1f} MB)", flush=True)
+        if os.path.exists(out_surround) and os.path.getsize(out_surround) > 1000 and not overwrite:
+            print(f"\n  [SKIP] 5.1 Surround AC3 already exists: {os.path.basename(out_surround)} (use --overwrite to force)", flush=True)
         else:
-            print(f"  [ERROR] Surround encode failed: {res_surr.stderr}", flush=True)
+            print(f"\n  [1/3] Encoding 5.1 Surround AC3 (640k)...", flush=True)
+            cmd_surround = [ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "warning", "-threads", str(threads), "-i", input_path]
+            if preview_sec:
+                cmd_surround.extend(["-t", f"{preview_sec:.3f}"])
+            cmd_surround.extend(["-c:a", "ac3", "-b:a", "640k", out_surround])
+            res_surr = subprocess.run(cmd_surround, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if res_surr.returncode == 0 and os.path.exists(out_surround):
+                size_mb = os.path.getsize(out_surround) / (1024 * 1024)
+                print(f"  [SUCCESS] Saved Surround AC3: {out_surround} ({size_mb:.1f} MB)", flush=True)
+            else:
+                print(f"  [ERROR] Surround encode failed: {res_surr.stderr}", flush=True)
     else:
         print(f"\n  [INFO] Source has {channels} channels (< 6). Skipping Surround AC3 encode.", flush=True)
+
+    stereo_exists = os.path.exists(out_stereo) and os.path.getsize(out_stereo) > 1000
+    night_exists = os.path.exists(out_night) and os.path.getsize(out_night) > 1000
+
+    if stereo_exists and night_exists and not overwrite:
+        print(f"\n  [SKIP] Main Stereo & Night Mode AAC already exist in output/ (use --overwrite to force re-render):", flush=True)
+        print(f"    ✓ {os.path.basename(out_stereo)} ({os.path.getsize(out_stereo)/(1024*1024):.1f} MB)", flush=True)
+        print(f"    ✓ {os.path.basename(out_night)} ({os.path.getsize(out_night)/(1024*1024):.1f} MB)", flush=True)
+        return
 
     # 2. Extract intermediate stereo WAV in scratch
     stereo_wav = os.path.join(scratch_dir, f"{re.sub(r'[^a-zA-Z0-9]', '_', base_title)}_stereo_temp.wav")
     print(f"\n  [2/3] Extracting intermediate 48kHz Stereo WAV for downmixing...", flush=True)
-    cmd_wav = [ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "warning", "-threads", str(threads), "-i", input_path]
+    cmd_wav = [ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "warning", "-threads", str(threads), "-fflags", "+genpts", "-i", input_path]
     if preview_sec:
         cmd_wav.extend(["-t", f"{preview_sec:.3f}"])
     if channels >= 6:
-        cmd_wav.extend(["-af", f"aresample=48000,{pan_stereo}", "-c:a", "pcm_s16le", stereo_wav])
+        cmd_wav.extend(["-af", f"asetpts=PTS-STARTPTS,aresample=48000,{pan_stereo}", "-c:a", "pcm_s16le", stereo_wav])
     else:
-        cmd_wav.extend(["-af", "aresample=48000", "-c:a", "pcm_s16le", stereo_wav])
+        cmd_wav.extend(["-af", "asetpts=PTS-STARTPTS,aresample=48000", "-c:a", "pcm_s16le", stereo_wav])
         
     res_wav = subprocess.run(cmd_wav, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if res_wav.returncode != 0 or not os.path.exists(stereo_wav):
@@ -124,36 +139,40 @@ def convert_track(ffmpeg_bin, ffprobe_bin, input_path, base_title, out_dir, scra
     print(f"  [SUCCESS] Extracted Stereo WAV: {stereo_wav} ({os.path.getsize(stereo_wav)/(1024*1024):.1f} MB)", flush=True)
 
     # 3. Standard Stereo AAC from stereo WAV
-    out_stereo = os.path.join(out_dir, f"{base_title} (Stereo){suffix}.m4a")
-    print(f"\n  [3/3] Encoding Main Stereo AAC (alimiter)...", flush=True)
-    cmd_stereo = [
-        ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "warning", "-threads", str(threads),
-        "-i", stereo_wav,
-        "-af", "alimiter=level_in=1:level_out=0.98:limit=0.98",
-        "-c:a", "aac", "-b:a", "256k", out_stereo
-    ]
-    res_stereo = subprocess.run(cmd_stereo, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if res_stereo.returncode == 0 and os.path.exists(out_stereo):
-        size_mb = os.path.getsize(out_stereo) / (1024 * 1024)
-        print(f"  [SUCCESS] Saved Stereo AAC: {out_stereo} ({size_mb:.1f} MB)", flush=True)
+    if stereo_exists and not overwrite:
+        print(f"\n  [SKIP] Main Stereo AAC already exists: {os.path.basename(out_stereo)}", flush=True)
     else:
-        print(f"  [ERROR] Stereo encode failed: {res_stereo.stderr}", flush=True)
+        print(f"\n  [3/3] Encoding Main Stereo AAC (alimiter)...", flush=True)
+        cmd_stereo = [
+            ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "warning", "-threads", str(threads),
+            "-i", stereo_wav,
+            "-af", "alimiter=level_in=1:level_out=0.98:limit=0.98",
+            "-c:a", "aac", "-b:a", "256k", out_stereo
+        ]
+        res_stereo = subprocess.run(cmd_stereo, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if res_stereo.returncode == 0 and os.path.exists(out_stereo):
+            size_mb = os.path.getsize(out_stereo) / (1024 * 1024)
+            print(f"  [SUCCESS] Saved Stereo AAC: {out_stereo} ({size_mb:.1f} MB)", flush=True)
+        else:
+            print(f"  [ERROR] Stereo encode failed: {res_stereo.stderr}", flush=True)
 
     # 4. Night Mode AAC from stereo WAV
-    out_night = os.path.join(out_dir, f"{base_title} (Night Mode){suffix}.m4a")
-    print(f"\n  [4/3] Encoding Main Night Mode AAC (loudnorm -16 LUFS)...", flush=True)
-    cmd_night = [
-        ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "warning", "-threads", str(threads),
-        "-i", stereo_wav,
-        "-af", "loudnorm=I=-16.0:TP=-1.5:LRA=11", "-ar", "48000",
-        "-c:a", "aac", "-b:a", "256k", out_night
-    ]
-    res_night = subprocess.run(cmd_night, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if res_night.returncode == 0 and os.path.exists(out_night):
-        size_mb = os.path.getsize(out_night) / (1024 * 1024)
-        print(f"  [SUCCESS] Saved Night Mode AAC: {out_night} ({size_mb:.1f} MB)", flush=True)
+    if night_exists and not overwrite:
+        print(f"\n  [SKIP] Main Night Mode AAC already exists: {os.path.basename(out_night)}", flush=True)
     else:
-        print(f"  [ERROR] Night Mode encode failed: {res_night.stderr}", flush=True)
+        print(f"\n  [4/3] Encoding Main Night Mode AAC (loudnorm -16 LUFS)...", flush=True)
+        cmd_night = [
+            ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "warning", "-threads", str(threads),
+            "-i", stereo_wav,
+            "-af", "loudnorm=I=-16.0:TP=-1.5:LRA=11", "-ar", "48000",
+            "-c:a", "aac", "-b:a", "256k", out_night
+        ]
+        res_night = subprocess.run(cmd_night, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if res_night.returncode == 0 and os.path.exists(out_night):
+            size_mb = os.path.getsize(out_night) / (1024 * 1024)
+            print(f"  [SUCCESS] Saved Night Mode AAC: {out_night} ({size_mb:.1f} MB)", flush=True)
+        else:
+            print(f"  [ERROR] Night Mode encode failed: {res_night.stderr}", flush=True)
 
     # 5. Clean up intermediate WAV
     if os.path.exists(stereo_wav):
@@ -170,6 +189,7 @@ def main():
     parser.add_argument("-d", "--dir", default=None, help="Directory containing audio tracks to process")
     parser.add_argument("-t", "--titles", nargs="+", default=None, help="Optional movie title prefix(es) corresponding to inputs")
     parser.add_argument("-o", "--outdir", default=None, help="Output directory (Defaults to <parent_dir>/output)")
+    parser.add_argument("-f", "--force-overwrite", "--overwrite", dest="overwrite", action="store_true", default=False, help="Overwrite existing output deliverables in output/ (Default: False, skips existing files)")
     parser.add_argument("--threads", type=int, default=2, help="Number of CPU threads for FFmpeg encoding (Default: 2)")
     parser.add_argument("--preview", type=float, default=None, help="Render preview sample duration in seconds")
     parser.add_argument("--ffmpeg", default=DEFAULT_FFMPEG, help="Path to ffmpeg executable")
@@ -218,7 +238,8 @@ def main():
             out_dir=out_dir,
             scratch_dir=scratch_dir,
             threads=args.threads,
-            preview_sec=args.preview
+            preview_sec=args.preview,
+            overwrite=args.overwrite
         )
         
     print("\n================================================================================")

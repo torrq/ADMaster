@@ -122,7 +122,10 @@ To configure custom binary paths, encoding threads, or loudness targets:
   "default_target_tp": -1.5,
 
   // Correlation anchors sampled across timeline
-  "default_anchors": 100
+  "default_anchors": 100,
+
+  // Overwrite existing output files (default: false)
+  "default_overwrite": false
 }
 ```
 

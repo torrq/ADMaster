@@ -28,5 +28,9 @@
   "default_target_tp": -1.5,
 
   // Default number of correlation analysis anchors sampled across the timeline (Default: 100).
-  "default_anchors": 100
+  "default_anchors": 100,
+
+  // Whether to overwrite existing deliverables in the output directory (Default: false).
+  // When false, existing output files are preserved and re-renders are skipped.
+  "default_overwrite": false
 }
