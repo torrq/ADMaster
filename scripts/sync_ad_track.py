@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 r"""
 ================================================================================
 Universal Audio Description (AD) & Main Audio Sync & Encoding Pipeline
 ================================================================================
-Author: Antigravity AI Pair Programmer
 Repository: adsync
+License: MIT
 
 Overview:
   High-performance acoustic cross-correlation alignment, DescribeAlign Dynamic

@@ -106,4 +106,7 @@ You can customize binary paths, default threads, and targets without modifying s
 ## BatchEncoder Integration
 For GUI-based bulk processing, this project pairs excellently with **BatchEncoder**. We maintain a custom `FFMPEG_BLURAY_AAC.xml` format preset that replicates these exact downmix and loudness matrices (via a 1-pass approximation) directly inside the BatchEncoder UI.
 
+## License
+This project and all included scripts are open-source and licensed under the [MIT License](LICENSE).
+
 *(For detailed architectural rules, LLM-agent instructions, and pipeline limitations, refer to `AGENTS.md`)*

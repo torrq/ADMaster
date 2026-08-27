@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """
 plex_ad_commentary_collections.py
 ─────────────────────────────────

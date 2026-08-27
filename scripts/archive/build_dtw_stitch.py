@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 import sys
 import os
 import re

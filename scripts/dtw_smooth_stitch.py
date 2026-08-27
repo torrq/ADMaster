@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """
 dtw_smooth_stitch.py - Smooth DTW Audio Stitcher with VAD-Aware Transitions
 
