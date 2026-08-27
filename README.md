@@ -139,6 +139,21 @@ To configure custom binary paths, encoding threads, or loudness targets:
 
 ---
 
+## Upstream Attribution & Technology
+
+Non-linear piecewise synchronization in this toolkit is powered by **[DescribeAlign](https://github.com/julbean/describealign)**.
+
+**DescribeAlign** provides a brilliant implementation of acoustic Dynamic Time Warping (DTW) formulated as a linear programming optimization problem (`scipy.optimize.linprog`). It computes optimal warping paths across non-identical timelines, solving the complex problem of aligning audio across alternate cuts (Theatrical vs. Extended), censorship trims, and broadcast commercial breaks.
+
+**adsync** integrates DescribeAlign's alignment engine and feeds its warping vectors directly into our 3-layer post-processing pipeline ([`dtw_smooth_stitch.py`](scripts/README.md#3-dtw_smooth_stitchpy-dtw-transition-smoother)):
+1. **VAD Cut Nudging**: Evaluates narrator RMS energy ($\pm 500\text{ms}$ search window, 200ms hangover) to snap cut points to natural silence gaps instead of mid-speech.
+2. **Zero-Crossing Phase Snapping**: Micro-adjusts cut boundaries ($\pm 2\text{ms}$) to waveform zero crossings, eliminating DC step discontinuities and pop artifacts.
+3. **Equal-Power Cosine Crossfades**: Blends segment junctions via 50ms constant-power crossfades ($\cos^2\theta + \sin^2\theta = 1$) with bit-perfect native PCM passthrough.
+
+Upstream project: **[https://github.com/julbean/describealign](https://github.com/julbean/describealign)**
+
+---
+
 ## BatchEncoder Integration
 
 For GUI-based bulk processing, this project pairs excellently with **BatchEncoder**. We maintain a custom `FFMPEG_BLURAY_AAC.xml` format preset that replicates these exact downmix and loudness matrices (via a 1-pass approximation) directly inside the BatchEncoder GUI.
