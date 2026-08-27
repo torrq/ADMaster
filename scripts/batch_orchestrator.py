@@ -185,7 +185,7 @@ def do_dtw(ep_num, mkv_file, ad_file, dry_run=False):
     subprocess.run(cmd, cwd=OUT_DIR)
     
     # describealign outputs both:
-    #   videos_with_ad/ad_<filename>   (aligned MKV — hard cuts, can be harsh)
+    #   videos_with_ad/ad_<filename>   (aligned MKV -- hard cuts, can be harsh)
     #   alignment_plots/<filename>.txt (piecewise timestamp map)
     
     # Look for alignment plot to use our smooth stitcher (preferred path)
@@ -197,8 +197,8 @@ def do_dtw(ep_num, mkv_file, ad_file, dry_run=False):
     aligned_files = glob.glob(os.path.join(OUT_DIR, "videos_with_ad", f"*{basename}"))
     
     if plot_files:
-        # ── Smooth Stitch Path (3-layer transitions) ──
-        print(f"[{ep_num}] Found alignment plot — applying smooth stitch with VAD transitions...")
+        # -- Smooth Stitch Path (3-layer transitions) --
+        print(f"[{ep_num}] Found alignment plot -- applying smooth stitch with VAD transitions...")
         
         # Import the smooth stitcher
         sys.path.insert(0, SCRIPT_DIR)
@@ -252,7 +252,7 @@ def do_dtw(ep_num, mkv_file, ad_file, dry_run=False):
         except Exception as e:
             print(f"[{ep_num}] WARNING: Smooth stitch failed ({e}), falling back to describealign output...")
     
-    # ── Fallback: Use describealign's direct output ──
+    # -- Fallback: Use describealign's direct output --
     if not aligned_files:
         print(f"[{ep_num}] ERROR: describealign failed to produce output!")
         return
@@ -260,7 +260,7 @@ def do_dtw(ep_num, mkv_file, ad_file, dry_run=False):
     import shutil
     shutil.move(aligned_files[0], out_file)
     
-    # describealign outputs AD as a:0, Main as a:1 — swap to our standard order
+    # describealign outputs AD as a:0, Main as a:1 -- swap to our standard order
     temp_file = out_file + ".temp.mkv"
     remux_cmd = [
         FFMPEG, "-y", "-hide_banner", "-loglevel", "error",

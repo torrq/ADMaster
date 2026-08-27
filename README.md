@@ -1,6 +1,6 @@
 <img width="1200" height="275" alt="adsync" src="https://github.com/user-attachments/assets/077d4b0a-5649-40b6-af4c-9e76a175a1cf" />
 
-# adsync — Universal Audio Description & Secondary Audio Sync Toolkit
+# adsync -- Universal Audio Description & Secondary Audio Sync Toolkit
 
 **adsync** is a high-performance, automated Python toolkit for synchronizing, downmixing, loudness-normalizing, and packaging Audio Description (AD) and secondary commentary tracks for movies and television series.
 
@@ -71,7 +71,7 @@ python scripts/set_commentary_flags.py "X:\video\TV\Show_Title"
 | **Best Used For** | Identical cuts (same edit, different audio delay or master). | Alternate cuts (Theatrical vs Extended, TV trims, commercials). |
 | **Audio Integrity** | **100% Bit-Perfect Linear Passthrough:** Preserves decoded PCM samples bit-for-bit. Zero pitch/tempo warping. | **Piecewise Reconstruction:** Slices into discrete segments and crossfades transitions. |
 | **Precision** | Sub-millisecond sample accuracy ($\pm 1\text{ms}$). | Quantized time step windows (~100ms resolution). |
-| **Execution Time** | **~2–4 seconds** via in-memory 8kHz FFT arrays. | **1–3 minutes** per track (feature extraction + LP optimization). |
+| **Execution Time** | **~2-4 seconds** via in-memory 8kHz FFT arrays. | **1-3 minutes** per track (feature extraction + LP optimization). |
 | **Diagnostic Role** | Consensus score immediately validates whether cuts match ($\ge 50\%$) or differ ($< 10\%$). | Engages automatically when anchor score confirms cut mismatch. |
 
 ---

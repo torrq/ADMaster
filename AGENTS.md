@@ -3,8 +3,8 @@
 ## 1. BatchEncoder Configuration
 
 ### Tool & Format Setup
-* **FFmpeg binary**: Configured in `tools/ffmpeg_x64.xml` → `path="...ffmpeg.exe"`.
-* **Format XMLs** (`formats/`): Define command templates, extensions, and presets. Key format: `FFMPEG_BLURAY_AAC` for 5.1/7.1→stereo AAC downmix with 1-pass `loudnorm`.
+* **FFmpeg binary**: Configured in `tools/ffmpeg_x64.xml` -> `path="...ffmpeg.exe"`.
+* **Format XMLs** (`formats/`): Define command templates, extensions, and presets. Key format: `FFMPEG_BLURAY_AAC` for 5.1/7.1->stereo AAC downmix with 1-pass `loudnorm`.
 * **Progress parsing**: `progress/GetProgress_FFmpegEnc.lua` (FFmpeg), `progress/GetProgress_eac3to.lua` (eac3to).
 * **Output naming**: `Outputs.xml` patterns (e.g. `$InputPath$\$Name$.$Ext$`). Format-level `extension=` controls `$Ext$`.
 
@@ -18,12 +18,12 @@
 For encoding specs, FFmpeg rules, and detailed workflow instructions, see the **audio-description-frame-perfect-sync** skill (`SKILL.md`).
 
 > [!CAUTION]
-> **FFmpeg Raw Bitstream Stall Bug:** Raw audio files (`.dts`, `.ac3`, `.eac3`, `.thd`, `.dtshd`) have NO container seek index. `-ss` before `-i` hangs indefinitely. `-ss` after `-i` forces linear decode from byte 0 every call — making repeated seeking (like 10-anchor correlation) take 10+ minutes on a 2-hour file. **NEVER repeatedly seek into raw bitstreams.** The fix in `sync_ad_track.py` is `predecode_to_mono_8k()`: decode the entire file to a tiny 8kHz mono WAV once, then do all math via in-memory numpy slicing. If you ever write new code that needs to seek into raw bitstreams, use this same pattern.
+> **FFmpeg Raw Bitstream Stall Bug:** Raw audio files (`.dts`, `.ac3`, `.eac3`, `.thd`, `.dtshd`) have NO container seek index. `-ss` before `-i` hangs indefinitely. `-ss` after `-i` forces linear decode from byte 0 every call -- making repeated seeking (like 10-anchor correlation) take 10+ minutes on a 2-hour file. **NEVER repeatedly seek into raw bitstreams.** The fix in `sync_ad_track.py` is `predecode_to_mono_8k()`: decode the entire file to a tiny 8kHz mono WAV once, then do all math via in-memory numpy slicing. If you ever write new code that needs to seek into raw bitstreams, use this same pattern.
 
 ### sync_ad_track.py (Unified Sync & Encoding Tool)
 * **Primary Mandate**: Always use `sync_ad_track.py` for queue and movie processing rather than creating custom one-off scripts.
 * **Directory Auto-Discovery**: Passing a folder path (e.g. `python scripts/sync_ad_track.py "F:\uploads\queue\<Movie>"`) automatically pairs `source/*` with all AD tracks in `tosync/*`.
-* **100-Anchor FFT Cross-Correlation**: Samples 100 anchors evenly across 5%–88% of the timeline via fast FFT in memory (pre-decoding streams once to 8kHz mono WAV in `scratch/`).
+* **100-Anchor FFT Cross-Correlation**: Samples 100 anchors evenly across 5%-88% of the timeline via fast FFT in memory (pre-decoding streams once to 8kHz mono WAV in `scratch/`).
 * **Direct DTW Fast-Path (`--force-dtw`)**: Bypasses the 100-anchor search entirely and executes DescribeAlign DTW piecewise alignment and 3-layer transition smoothing directly.
 * **Stream Selection (`--ref-stream`)**: Choose specific audio tracks from multi-track MKVs (e.g. `--ref-stream 0:a:1`).
 * **Dynamic Sample-Rate PAL Handling (`--pal` / `--no-pal`)**: Probes input sample rates (44.1k vs 48k) to compute exact dynamic clock values for PAL 25fps slowdowns:
@@ -31,7 +31,7 @@ For encoding specs, FFmpeg rules, and detailed workflow instructions, see the **
   Use `--no-pal` to enforce native 1.0x speed on shorter Theatrical Cuts.
 * **Strict 2.0 Downmix Matrix**: Enforces ITU-R BS.775 matrix (`pan=stereo|c0=c0+0.7071*c2+0.7071*c4|c1=c1+0.7071*c2+0.7071*c5`), `-ac 2`, and `-ar 48000` for all stereo and night mode deliverables.
 * **Automatic Directory Routing**: Automatically sets `<movie_dir>/output/` for final encodes and `<movie_dir>/scratch/` for temporary analysis files.
-* **Intermediate PCM WAV Rendering**: Decompresses and downmixes surround master audio and synchronized AD audio into clean 48kHz WAVs in `scratch/` once before rendering stereo variants. Eliminates redundant DTS/TrueHD decodes, accelerates `loudnorm` by 2–3x, and eliminates FFmpeg filter buffer stalls.
+* **Intermediate PCM WAV Rendering**: Decompresses and downmixes surround master audio and synchronized AD audio into clean 48kHz WAVs in `scratch/` once before rendering stereo variants. Eliminates redundant DTS/TrueHD decodes, accelerates `loudnorm` by 2-3x, and eliminates FFmpeg filter buffer stalls.
 * **Local Machine Configuration**: Automatically reads custom paths (`ffmpeg_path`, `ffprobe_path`, `describealign_path`) and default preferences (`default_threads`, `default_target_i`, `default_anchors`) from `config.local.json` or `config.json` (falling back to `config.default.json`).
 * **Thread Throttling (`--threads`)**: Enforces FFmpeg concurrency limit (default: `2` threads) to keep host systems responsive during heavy multi-track processing.
 * **Atomic Pre-Decoding**: Uses temporary files (`_tmp.wav`) and atomic `os.replace` to prevent corrupted/half-written cache files from cancelled tasks.
@@ -40,17 +40,17 @@ For encoding specs, FFmpeg rules, and detailed workflow instructions, see the **
   * **Main Audio (`--convert-main`)**: Probes channels and outputs `(Surround).ac3` (5.1 640k), `(Stereo).m4a` (true 2.0 downmix + `alimiter`), and `(Night Mode).m4a` (true 2.0 downmix + `loudnorm`).
 * **Preview Mode (`--preview [sec]`)**: Fast test-listening with optional MKV video muxing (`-m`).
 
-### describealign (Fallback — Dynamic Time Warping)
+### describealign (Fallback -- Dynamic Time Warping)
 * **When**: Cross-correlation fails due to different edits (commercial cuts, scene additions, network vs bluray).
 * **How**: DTW + linear programming (`scipy.optimize.linprog`) builds piecewise alignment map.
 * **Command**: `python describealign.py --yes --stretch_audio <master> <ad_track>`
 * **Outputs**: `videos_with_ad/ad_<filename>` (aligned MKV), `alignment_plots/<filename>.txt` (timestamp map).
-* **Track order gotcha**: Outputs AD as `a:0`, Main as `a:1` — reverse of our standard. Always remux to swap.
+* **Track order gotcha**: Outputs AD as `a:0`, Main as `a:1` -- reverse of our standard. Always remux to swap.
 * **Automation gotcha**: `--yes` required (skips interactive prompt that stalls batch scripts).
 * **Cleanup**: Run from `scratch/` directory to contain generated `videos_with_ad/` and `alignment_plots/` junk.
 
 ### 35mm Film Scans & Piecewise Reel Sync (Rule of Thumb)
-* **The 35mm Film Challenge**: 35mm theatrical prints are divided into physical 20-minute reels (~5–6 reels per feature). Splice wear creates discrete missing frame jumps ($\Delta t \approx 0.2\text{s} - 2.0\text{s}$) at reel changes (~20m, ~40m, ~60m, ~75m, ~92m), but **audio runs at exact 1.000000x native speed within every reel**.
+* **The 35mm Film Challenge**: 35mm theatrical prints are divided into physical 20-minute reels (~5-6 reels per feature). Splice wear creates discrete missing frame jumps ($\Delta t \approx 0.2\text{s} - 2.0\text{s}$) at reel changes (~20m, ~40m, ~60m, ~75m, ~92m), but **audio runs at exact 1.000000x native speed within every reel**.
 * **Why DescribeAlign DTW Fails on 35mm**: DescribeAlign is quantized to 100ms time steps and continuously time-stretches/compresses audio (`-0.6%`, `-4.1%`, `+17.3%`), causing audible pitch distortion and continuous lead/lag sync drift.
 * **The Frame-Perfect Fix**:
   1. Detect high-confidence offset clusters across anchors.
@@ -61,19 +61,19 @@ For encoding specs, FFmpeg rules, and detailed workflow instructions, see the **
 ### dtw_smooth_stitch.py (Post-DescribeAlign Transition Smoother)
 Replaces the old hard-cut `build_dtw_stitch.py`. Parses describealign alignment plots and re-stitches AD audio through a **3-layer transition smoothing pipeline**:
 
-1. **Layer 1 — VAD-Aware Cut Nudging**: At each segment boundary, checks RMS energy in 50ms analysis windows. If speech is active at a cut point, the outgoing boundary is extended forward (or incoming pulled backward) to the nearest silence gap. Configurable: `±500ms` search, `200ms` consecutive silence hangover, `0.02` RMS threshold.
-2. **Layer 2 — Zero-Crossing Snapping**: After VAD nudging, each cut point is snapped to the nearest waveform zero crossing within `±2ms` to eliminate DC-offset pops and sub-sample clicks.
-3. **Layer 3 — Equal-Power Crossfade**: At each segment junction, a cosine-shaped equal-power crossfade (`50ms` default) blends outgoing and incoming audio via overlap-add mixing. Satisfies the constant-power identity $\cos^2 + \sin^2 = 1$.
+1. **Layer 1 -- VAD-Aware Cut Nudging**: At each segment boundary, checks RMS energy in 50ms analysis windows. If speech is active at a cut point, the outgoing boundary is extended forward (or incoming pulled backward) to the nearest silence gap. Configurable: `+/-500ms` search, `200ms` consecutive silence hangover, `0.02` RMS threshold.
+2. **Layer 2 -- Zero-Crossing Snapping**: After VAD nudging, each cut point is snapped to the nearest waveform zero crossing within `+/-2ms` to eliminate DC-offset pops and sub-sample clicks.
+3. **Layer 3 -- Equal-Power Crossfade**: At each segment junction, a cosine-shaped equal-power crossfade (`50ms` default) blends outgoing and incoming audio via overlap-add mixing. Satisfies the constant-power identity $\cos^2 + \sin^2 = 1$.
 
 **Standalone usage**: `python dtw_smooth_stitch.py <alignment_plot.txt> <ad_audio> <output.m4a>`
 **Integrated**: `batch_orchestrator.py` automatically imports and calls `run_smooth_stitch()` after describealign produces an alignment plot. Falls back to describealign's raw output if smooth stitching fails.
 
 ### batch_orchestrator.py Strategy Decision Tree
 Automatically selects per episode:
-1. **Direct Mux** — single consistent offset, no black screens.
-2. **Frame-Perfect** — black screens detected and offset count matches gap count.
-3. **DTW (describealign + smooth stitch)** — no black screens but multiple drifting offsets. Runs describealign for alignment, then re-stitches with `dtw_smooth_stitch.py` for clean transitions.
-4. **Piecewise Reel Sync** — 35mm scans with discrete reel jumps; keeps 1.0x native playback speed and splices at silence.
+1. **Direct Mux** -- single consistent offset, no black screens.
+2. **Frame-Perfect** -- black screens detected and offset count matches gap count.
+3. **DTW (describealign + smooth stitch)** -- no black screens but multiple drifting offsets. Runs describealign for alignment, then re-stitches with `dtw_smooth_stitch.py` for clean transitions.
+4. **Piecewise Reel Sync** -- 35mm scans with discrete reel jumps; keeps 1.0x native playback speed and splices at silence.
 
 ### Other Core Scripts
 * `convert_main_tracks.py`: Extract & downmix 5.1/7.1 surround masters to true 2.0 Stereo AAC and Night Mode AAC.
@@ -91,7 +91,7 @@ See `scripts/README.md` for the full scripts index.
 ## 3. Critical Alignment Insights & Best Practices
 
 ### 1. Sample-Accurate PAL $\to$ Film Conversion (`asetrate` vs `atempo`)
-* **The Problem with `atempo`**: `atempo` uses WSOLA time-domain grain overlap. Over a 2.5–3.5 hour theatrical film, small micro-errors accumulate, causing perceptible pitch/phase smearing and subtle synchronization drift.
+* **The Problem with `atempo`**: `atempo` uses WSOLA time-domain grain overlap. Over a 2.5-3.5 hour theatrical film, small micro-errors accumulate, causing perceptible pitch/phase smearing and subtle synchronization drift.
 * **The Solution**: Use sample-rate playback clock manipulation:
   $$\text{target\_rate} = \text{input\_sr} \times \frac{23.976023976}{25.0}$$
   Followed by `aresample=48000`.
@@ -103,10 +103,10 @@ See `scripts/README.md` for the full scripts index.
 ### 2. DTW Segment Resampling Fidelity (Sinc vs. Linear Interpolation)
 * **The Pitfall of `np.interp`**: In Digital Signal Processing, linear interpolation (`np.interp` / first-order hold) acts as a triangular low-pass filter in the frequency domain with response:
   $$H(f) = \left( \frac{\sin(\pi f / f_s)}{\pi f / f_s} \right)^2$$
-  Applying linear interpolation across millions of audio samples causes $>46\%$ energy attenuation above 8–10 kHz, creating a severely muffled "AM radio brickwall" artifact.
+  Applying linear interpolation across millions of audio samples causes $>46\%$ energy attenuation above 8-10 kHz, creating a severely muffled "AM radio brickwall" artifact.
 * **The Rules**:
   1. **Bit-Perfect Native Audio**: For all native-speed segments ($\text{rate change} < 1.0\%$), never apply time interpolation. Preserve decoded PCM samples bit-for-bit directly from `samples[s:e]`.
-  2. **Bandlimited Sinc Resampling**: When genuine rate changes are required (e.g. PAL 4.27% stretch), always use bandlimited sinc/Fourier resampling (`scipy.signal.resample` or `soxr`) to maintain 100% full 20Hz–20kHz frequency response with 0.0 dB attenuation.
+  2. **Bandlimited Sinc Resampling**: When genuine rate changes are required (e.g. PAL 4.27% stretch), always use bandlimited sinc/Fourier resampling (`scipy.signal.resample` or `soxr`) to maintain 100% full 20Hz-20kHz frequency response with 0.0 dB attenuation.
   3. **Memory Protections**: Avoid allocating full-timeline `float64` interpolation arrays via `np.linspace` across 3-hour files ($>480\text{M}$ samples), which triggers Python `Unable to allocate 3.64 GiB` out-of-memory errors. Use `float32` chunking or FFmpeg streaming resamplers.
 
 ### 3. TV Broadcast vs. Home Video Master Discrepancies
@@ -163,3 +163,9 @@ See `scripts/README.md` for the full scripts index.
 * **Project scripts**: `scripts\`
 * **DescribeAlign**: `describealign.py`
 * **FFmpeg binaries**: `adsync\bin\` (auto-resolved by Python scripts)
+
+---
+
+## 6. Pure ASCII Enforcement Rule
+* **All Python scripts, JSON configuration files, markdown documentation, comments, and console print outputs MUST be 100% pure ASCII.**
+* Never use Unicode checkmarks (use `[OK]`), Unicode cross marks (use `[X]`), em-dashes (use `--`), en-dashes (use `-`), Unicode bullets (use `*`), Unicode arrows (use `->` or `<-`), curly quotes (use standard `'` or `"`), mathematical symbols (use `+/-`, `*`, `pi`, `^2`), or box-drawing characters.

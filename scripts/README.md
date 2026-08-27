@@ -8,16 +8,16 @@ This directory contains the production-ready tools for acoustic audio descriptio
 
 | Script | Primary Responsibility | Modifies Video? | Input Types | Output Deliverables |
 | :--- | :--- | :---: | :--- | :--- |
-| **[`sync_ad_track.py`](#1-sync_ad_trackpy-master-sync--encoder)** | Universal acoustic alignment & audio encoding | ❌ No | MKV, MP4, DTS, AC3, FLAC, MP3, WAV | Aligned `-AD (Stereo).m4a`, `-AD (Night Mode).m4a`, `(Surround).ac3`, `(Stereo).m4a` |
-| **[`batch_orchestrator.py`](#2-batch_orchestratorpy-tv-season-orchestrator)** | Automated heuristic TV series strategy router | ⚠️ Yes (if needed) | Directory of MKV episodes + AD tracks | Synced MKVs via Direct Mux, Frame-Perfect Cut, or DTW |
-| **[`dtw_smooth_stitch.py`](#3-dtw_smooth_stitchpy-dtw-transition-smoother)** | 3-Layer DTW transition smoother | ❌ No | Alignment map + Source AD audio | Stitched, smooth AD audio with VAD + Crossfades |
-| **[`batch_frameperfect.py`](#4-batch_frameperfectpy-commercial-break-cutter)** | Surgical video/audio commercial gap excision | ✅ Yes | MKVs with black commercial gaps | Clean MKV without black gaps, frame-accurate |
-| **[`remove_commercial_breaks.py`](#5-remove_commercial_breakspy-break-detector)** | Dual black & silence gap scanner | ❌ No | MKV video files | JSON / formatted slice timestamps |
-| **[`convert_main_tracks.py`](#6-convert_main_trackspy-master-audio-converter)** | Standalone 5.1/7.1 downmixing converter | ❌ No | Multi-channel audio / video | Surround AC3, True 2.0 Stereo AAC, Night Mode AAC |
-| **[`convert_ad_2pass.py`](#7-convert_ad_2passpy-2-pass-loudness-normalizer)** | Standalone 2-pass EBU R128 normalizer | ❌ No | Standalone audio files | Broadcast normalized 2.0 AAC |
-| **[`set_commentary_flags.py`](#8-set_commentary_flagspy-in-place-mkv-tagger)** | In-place Matroska commentary flagger | ❌ No | MKV files / directory | In-place tagged MKV (`flag-commentary=1`) |
-| **[`plex_ad_commentary_collections.py`](#9-plex_ad_commentary_collectionspy-plex-sync)** | Plex server collection maintainer | ❌ No | Plex media library | Smart static collections in Plex |
-| **[`parse_mpls.py`](#10-parse_mplspy-blu-ray-playlist-parser)** | Blu-ray 45 kHz PTS playlist parser | ❌ No | Retail `.mpls` playlist files | Clip list with exact in/out timestamps |
+| **[`sync_ad_track.py`](#1-sync_ad_trackpy-master-sync--encoder)** | Universal acoustic alignment & audio encoding | No | MKV, MP4, DTS, AC3, FLAC, MP3, WAV | Aligned `-AD (Stereo).m4a`, `-AD (Night Mode).m4a`, `(Surround).ac3`, `(Stereo).m4a` |
+| **[`batch_orchestrator.py`](#2-batch_orchestratorpy-tv-season-orchestrator)** | Automated heuristic TV series strategy router | Conditional | Directory of MKV episodes + AD tracks | Synced MKVs via Direct Mux, Frame-Perfect Cut, or DTW |
+| **[`dtw_smooth_stitch.py`](#3-dtw_smooth_stitchpy-dtw-transition-smoother)** | 3-Layer DTW transition smoother | No | Alignment map + Source AD audio | Stitched, smooth AD audio with VAD + Crossfades |
+| **[`batch_frameperfect.py`](#4-batch_frameperfectpy-commercial-break-cutter)** | Surgical video/audio commercial gap excision | Yes | MKVs with black commercial gaps | Clean MKV without black gaps, frame-accurate |
+| **[`remove_commercial_breaks.py`](#5-remove_commercial_breakspy-break-detector)** | Dual black & silence gap scanner | No | MKV video files | JSON / formatted slice timestamps |
+| **[`convert_main_tracks.py`](#6-convert_main_trackspy-master-audio-converter)** | Standalone 5.1/7.1 downmixing converter | No | Multi-channel audio / video | Surround AC3, True 2.0 Stereo AAC, Night Mode AAC |
+| **[`convert_ad_2pass.py`](#7-convert_ad_2passpy-2-pass-loudness-normalizer)** | Standalone 2-pass EBU R128 normalizer | No | Standalone audio files | Broadcast normalized 2.0 AAC |
+| **[`set_commentary_flags.py`](#8-set_commentary_flagspy-in-place-mkv-tagger)** | In-place Matroska commentary flagger | No | MKV files / directory | In-place tagged MKV (`flag-commentary=1`) |
+| **[`plex_ad_commentary_collections.py`](#9-plex_ad_commentary_collectionspy-plex-sync)** | Plex server collection maintainer | No | Plex media library | Smart static collections in Plex |
+| **[`parse_mpls.py`](#10-parse_mplspy-blu-ray-playlist-parser)** | Blu-ray 45 kHz PTS playlist parser | No | Retail `.mpls` playlist files | Clip list with exact in/out timestamps |
 
 ---
 
@@ -80,9 +80,9 @@ python scripts/batch_orchestrator.py --dry-run
 
 Post-processor for DescribeAlign timestamp maps. Re-stitches AD audio using a transparent **3-layer transition smoothing pipeline**:
 
-1. **Layer 1 — VAD-Aware Cut Nudging**: Analyzes center/narrator RMS energy around segment boundaries. If a cut point lands mid-speech, the cut is automatically nudged forward or backward to the nearest natural silence gap (±500ms search window, 200ms hangover).
-2. **Layer 2 — Zero-Crossing Snapping**: Micro-adjusts boundaries (±2ms) to land on exact waveform zero crossings, eliminating DC offset pop artifacts.
-3. **Layer 3 — Equal-Power Crossfade & Sinc Resampling**: Blends segment junctions using 50ms constant-power cosine crossfades ($\cos^2 + \sin^2 = 1$). Applies bandlimited sinc resampling for genuine rate changes and bit-perfect native PCM passthrough for 1.0x segments.
+1. **Layer 1 -- VAD-Aware Cut Nudging**: Analyzes center/narrator RMS energy around segment boundaries. If a cut point lands mid-speech, the cut is automatically nudged forward or backward to the nearest natural silence gap (+/-500ms search window, 200ms hangover).
+2. **Layer 2 -- Zero-Crossing Snapping**: Micro-adjusts boundaries (+/-2ms) to land on exact waveform zero crossings, eliminating DC offset pop artifacts.
+3. **Layer 3 -- Equal-Power Crossfade & Sinc Resampling**: Blends segment junctions using 50ms constant-power cosine crossfades ($\cos^2 + \sin^2 = 1$). Applies bandlimited sinc resampling for genuine rate changes and bit-perfect native PCM passthrough for 1.0x segments.
 
 ### Common Commands:
 ```powershell
@@ -121,9 +121,9 @@ python scripts/remove_commercial_breaks.py "F:\media\Episode01.mkv"
 Standalone audio processor for extracting and downmixing 5.1 and 7.1 surround sound master tracks into multiple standardized formats without performing alignment.
 
 ### Outputs Generated:
-* `(Surround).ac3` — 5.1 AC3 Surround stream (640 kbps).
-* `(Stereo).m4a` — True 2.0 Stereo downmix using ITU-R BS.775 matrix + peak limiter (`alimiter`).
-* `(Night Mode).m4a` — True 2.0 Stereo downmix using ITU-R BS.775 matrix + broadcast loudness normalization (`loudnorm=I=-16:TP=-1.5:LRA=11`).
+* `(Surround).ac3` -- 5.1 AC3 Surround stream (640 kbps).
+* `(Stereo).m4a` -- True 2.0 Stereo downmix using ITU-R BS.775 matrix + peak limiter (`alimiter`).
+* `(Night Mode).m4a` -- True 2.0 Stereo downmix using ITU-R BS.775 matrix + broadcast loudness normalization (`loudnorm=I=-16:TP=-1.5:LRA=11`).
 
 ### Common Commands:
 ```powershell

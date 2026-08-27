@@ -11,11 +11,11 @@ segment boundaries:
     - At each segment boundary, checks for active speech using RMS energy
       on 50ms analysis windows. If speech is detected, the outgoing cut
       is extended forward and/or the incoming cut is pulled backward to
-      the nearest silence gap (configurable ±500ms search, 200ms hangover).
+      the nearest silence gap (configurable +/-500ms search, 200ms hangover).
 
   Layer 2: Zero-Crossing Snapping
     - After VAD nudging, each cut point is snapped to the nearest waveform
-      zero crossing within ±2ms to eliminate DC-offset pops and clicks.
+      zero crossing within +/-2ms to eliminate DC-offset pops and clicks.
 
   Layer 3: Equal-Power Crossfading
     - At each segment junction, a cosine-shaped equal-power crossfade
@@ -48,7 +48,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 BIN_DIR = os.path.join(os.path.dirname(SCRIPT_DIR), "bin")
 
 
-# ─── Utilities ────────────────────────────────────────────────────────────────
+# --- Utilities ----------------------------------------------------------------
 
 def find_ffmpeg():
     """Find ffmpeg binary from bin/ or system PATH."""
@@ -73,7 +73,7 @@ def fmt_time(seconds):
     return f"{int(m):02d}:{s:06.3f}"
 
 
-# ─── Alignment Plot Parser ───────────────────────────────────────────────────
+# --- Alignment Plot Parser ---------------------------------------------------
 
 def parse_alignment_plot(plot_file):
     """
@@ -132,7 +132,7 @@ def parse_alignment_plot(plot_file):
     return cleaned if cleaned else segments
 
 
-# ─── Audio I/O ────────────────────────────────────────────────────────────────
+# --- Audio I/O ----------------------------------------------------------------
 
 def predecode_to_pcm(input_audio, output_wav, ffmpeg, sample_rate=48000):
     """
@@ -152,7 +152,7 @@ def predecode_to_pcm(input_audio, output_wav, ffmpeg, sample_rate=48000):
 
 
 def load_wav(wav_path):
-    """Load WAV → numpy float32 array in [-1, 1]. Returns (samples, sample_rate)."""
+    """Load WAV -> numpy float32 array in [-1, 1]. Returns (samples, sample_rate)."""
     with wave.open(wav_path, "rb") as wf:
         sr = wf.getframerate()
         n = wf.getnframes()
@@ -199,7 +199,7 @@ def write_wav(samples, sr, output_path):
         wf.writeframes(pcm.tobytes())
 
 
-# ─── Layer 1: VAD-Aware Cut Nudging ──────────────────────────────────────────
+# --- Layer 1: VAD-Aware Cut Nudging ------------------------------------------
 
 def rms_energy(samples):
     """Root Mean Square energy of a sample buffer."""
@@ -262,7 +262,7 @@ def find_silence(samples, sr, origin, direction,
             silent_run = 0
             first_silent_pos = origin
 
-    return origin  # No silence found — keep original cut
+    return origin  # No silence found -- keep original cut
 
 
 def vad_nudge_boundaries(segments_samples, samples, sr,
@@ -278,7 +278,7 @@ def vad_nudge_boundaries(segments_samples, samples, sr,
         new_start = seg_start
         new_end = seg_end
 
-        # Nudge outgoing boundary (end of segment) — extend into silence
+        # Nudge outgoing boundary (end of segment) -- extend into silence
         if i < len(segments_samples) - 1:
             if has_speech(samples, sr, seg_end, threshold=threshold):
                 nudged = find_silence(samples, sr, seg_end, direction=+1,
@@ -292,7 +292,7 @@ def vad_nudge_boundaries(segments_samples, samples, sr,
                     )
                     new_end = nudged
 
-        # Nudge incoming boundary (start of segment) — pull back to catch word
+        # Nudge incoming boundary (start of segment) -- pull back to catch word
         if i > 0:
             if has_speech(samples, sr, seg_start, threshold=threshold):
                 nudged = find_silence(samples, sr, seg_start, direction=-1,
@@ -311,12 +311,12 @@ def vad_nudge_boundaries(segments_samples, samples, sr,
     return adjusted, nudge_log
 
 
-# ─── Layer 2: Zero-Crossing Snapping ─────────────────────────────────────────
+# --- Layer 2: Zero-Crossing Snapping -----------------------------------------
 
 def snap_zero_crossing(samples, sample_idx, radius_ms=2, sr=48000):
     """
     Snap a cut point to the nearest waveform zero crossing
-    within ±radius_ms to eliminate DC-offset pops.
+    within +/-radius_ms to eliminate DC-offset pops.
     """
     radius = int(sr * radius_ms / 1000.0)
     lo = max(0, sample_idx - radius)
@@ -337,7 +337,7 @@ def snap_zero_crossing(samples, sample_idx, radius_ms=2, sr=48000):
     return lo + int(best)
 
 
-# ─── Layer 3: Equal-Power Crossfade Stitching ────────────────────────────────
+# --- Layer 3: Equal-Power Crossfade Stitching --------------------------------
 
 def crossfade_stitch(segments_audio, crossfade_samples):
     """
@@ -345,9 +345,9 @@ def crossfade_stitch(segments_audio, crossfade_samples):
 
     Uses overlap-add: the last `crossfade_samples` of segment N overlap
     with the first `crossfade_samples` of segment N+1. Gains are:
-      outgoing = cos(t · π/2)     (1→0)
-      incoming = sin(t · π/2)     (0→1)
-    which satisfies the constant-power identity cos²+sin²=1.
+      outgoing = cos(t * pi/2)     (1->0)
+      incoming = sin(t * pi/2)     (0->1)
+    which satisfies the constant-power identity cos^2 + sin^2 = 1.
     """
     if len(segments_audio) == 0:
         return np.array([], dtype=np.float32)
@@ -356,8 +356,8 @@ def crossfade_stitch(segments_audio, crossfade_samples):
 
     xf = crossfade_samples
     t = np.linspace(0, 1, xf, dtype=np.float32)
-    fade_out = np.cos(t * np.pi / 2)   # 1 → 0
-    fade_in  = np.sin(t * np.pi / 2)   # 0 → 1
+    fade_out = np.cos(t * np.pi / 2)   # 1 -> 0
+    fade_in  = np.sin(t * np.pi / 2)   # 0 -> 1
     
     if segments_audio[0].ndim == 2:
         fade_out = fade_out[:, np.newaxis]
@@ -397,7 +397,7 @@ def crossfade_stitch(segments_audio, crossfade_samples):
     return np.clip(output, -1.0, 1.0)
 
 
-# ─── Main Pipeline ───────────────────────────────────────────────────────────
+# --- Main Pipeline -----------------------------------------------------------
 
 def smooth_stitch_audio(segments, samples, sr,
                         crossfade_ms=50, vad_search_ms=500,
@@ -415,15 +415,15 @@ def smooth_stitch_audio(segments, samples, sr,
     """
     xf_samples = int(sr * crossfade_ms / 1000.0)
 
-    # Convert time boundaries → sample indices
+    # Convert time boundaries -> sample indices
     seg_samples = []
     for seg in segments:
         s = max(0, int(seg["audio_start"] * sr))
         e = min(len(samples), int(seg["audio_end"] * sr))
         seg_samples.append((s, e))
 
-    # ── Layer 1: VAD-Aware Nudging ──
-    print(f"\n  Layer 1: VAD-Aware Cut Nudging (±{vad_search_ms}ms search, "
+    # -- Layer 1: VAD-Aware Nudging --
+    print(f"\n  Layer 1: VAD-Aware Cut Nudging (+/-{vad_search_ms}ms search, "
           f"{silence_ms}ms silence req, threshold={vad_threshold})")
     nudged, nudge_log = vad_nudge_boundaries(
         seg_samples, samples, sr,
@@ -433,10 +433,10 @@ def smooth_stitch_audio(segments, samples, sr,
         for msg in nudge_log:
             print(msg)
     else:
-        print("  [VAD] No speech detected at boundaries — all cuts are clean")
+        print("  [VAD] No speech detected at boundaries -- all cuts are clean")
 
-    # ── Layer 2: Zero-Crossing Snapping ──
-    print(f"\n  Layer 2: Zero-Crossing Snapping (±2ms radius)")
+    # -- Layer 2: Zero-Crossing Snapping --
+    print(f"\n  Layer 2: Zero-Crossing Snapping (+/-2ms radius)")
     snapped = []
     zc_count = 0
     for i, (s, e) in enumerate(nudged):
@@ -447,7 +447,7 @@ def smooth_stitch_audio(segments, samples, sr,
         snapped.append((new_s, new_e))
     print(f"  [ZC] Snapped {zc_count}/{len(snapped)} boundary pairs to zero crossings")
 
-    # ── Layer 3: Absolute Timeline Placement & Equal-Power Crossfade ──
+    # -- Layer 3: Absolute Timeline Placement & Equal-Power Crossfade --
     print(f"\n  Layer 3: Absolute Timeline Placement & Crossfade ({crossfade_ms}ms, "
           f"{xf_samples} samples)")
           
@@ -503,7 +503,7 @@ def run_smooth_stitch(plot_file, input_audio, output_audio,
                       vad_threshold=0.02, silence_ms=200,
                       scratch_dir=None):
     """
-    End-to-end smooth stitch: parse plot → decode → stitch → encode.
+    End-to-end smooth stitch: parse plot -> decode -> stitch -> encode.
 
     This is the main entry point for both CLI and batch_orchestrator import.
 
@@ -523,7 +523,7 @@ def run_smooth_stitch(plot_file, input_audio, output_audio,
     print("  VAD-Aware Nudging * Zero-Crossing Snap * Equal-Power Crossfade")
     print("=" * 64)
 
-    # ── Parse alignment plot ──
+    # -- Parse alignment plot --
     segments = parse_alignment_plot(plot_file)
     if not segments:
         raise ValueError(f"No segments found in alignment plot: {plot_file}")
@@ -535,12 +535,12 @@ def run_smooth_stitch(plot_file, input_audio, output_audio,
         print(f"    Seg {i+1}: AD [{fmt_time(seg['audio_start'])} -> "
               f"{fmt_time(seg['audio_end'])}] ({dur:.3f}s){rate_str}")
 
-    # ── Scratch directory ──
+    # -- Scratch directory --
     if scratch_dir is None:
         scratch_dir = os.path.join(os.path.dirname(output_audio), "scratch")
     os.makedirs(scratch_dir, exist_ok=True)
 
-    # ── Pre-decode to PCM WAV ──
+    # -- Pre-decode to PCM WAV --
     basename = os.path.splitext(os.path.basename(input_audio))[0]
     analysis_wav = os.path.join(scratch_dir, f"{basename}_pcm48k.wav")
 
@@ -550,12 +550,12 @@ def run_smooth_stitch(plot_file, input_audio, output_audio,
         print(f"\n  Pre-decoding to PCM 48kHz WAV...")
         predecode_to_pcm(input_audio, analysis_wav, ffmpeg, sample_rate=48000)
 
-    # ── Load samples ──
+    # -- Load samples --
     samples, sr = load_wav(analysis_wav)
     duration = len(samples) / sr
     print(f"  Loaded {len(samples):,} samples ({duration:.1f}s) at {sr}Hz")
 
-    # ── Smooth stitch ──
+    # -- Smooth stitch --
     print(f"\n{'-' * 50}")
     print("  APPLYING 3-LAYER TRANSITION SMOOTHING")
     print(f"{'-' * 50}")
@@ -571,11 +571,11 @@ def run_smooth_stitch(plot_file, input_audio, output_audio,
     out_duration = len(stitched) / sr
     print(f"\n  Stitched result: {out_duration:.1f}s ({len(stitched):,} samples)")
 
-    # ── Write intermediate WAV ──
+    # -- Write intermediate WAV --
     raw_wav = os.path.join(scratch_dir, f"{basename}_stitched_raw.wav")
     write_wav(stitched, sr, raw_wav)
 
-    # ── Encode to final format ──
+    # -- Encode to final format --
     print(f"\n  Encoding final output tracks...")
     
     ext = os.path.splitext(output_audio)[1].lower()
@@ -617,16 +617,16 @@ def run_smooth_stitch(plot_file, input_audio, output_audio,
     return output_standard
 
 
-# ─── CLI Entry Point ─────────────────────────────────────────────────────────
+# --- CLI Entry Point ---------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Smooth DTW Audio Stitcher — "
+        description="Smooth DTW Audio Stitcher -- "
                     "VAD-aware transitions for describealign alignment plots",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic stitch with default settings (50ms crossfade, ±500ms VAD search):
+  # Basic stitch with default settings (50ms crossfade, +/-500ms VAD search):
   python dtw_smooth_stitch.py alignment.txt AD_track.mka output.m4a
 
   # Wider VAD search for episodes with very long narration tails:

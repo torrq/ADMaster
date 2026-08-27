@@ -117,8 +117,8 @@ def convert_track(ffmpeg_bin, ffprobe_bin, input_path, base_title, out_dir, scra
 
     if stereo_exists and night_exists and not overwrite:
         print(f"\n  [SKIP] Main Stereo & Night Mode AAC already exist in output/ (use --overwrite to force re-render):", flush=True)
-        print(f"    ✓ {os.path.basename(out_stereo)} ({os.path.getsize(out_stereo)/(1024*1024):.1f} MB)", flush=True)
-        print(f"    ✓ {os.path.basename(out_night)} ({os.path.getsize(out_night)/(1024*1024):.1f} MB)", flush=True)
+        print(f"    [OK] {os.path.basename(out_stereo)} ({os.path.getsize(out_stereo)/(1024*1024):.1f} MB)", flush=True)
+        print(f"    [OK] {os.path.basename(out_night)} ({os.path.getsize(out_night)/(1024*1024):.1f} MB)", flush=True)
         return
 
     # 2. Extract intermediate stereo WAV in scratch

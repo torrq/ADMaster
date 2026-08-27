@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 """
 plex_ad_commentary_collections.py
-─────────────────────────────────
+---------------------------------
 Scan a Plex library and maintain static collections for movies/shows that
 contain Audio Description (AD) or Commentary audio tracks.
 
@@ -38,8 +38,8 @@ Usage:
     python plex_ad_commentary_collections.py --no-ad
 
 Environment variables (or pass via CLI flags):
-    PLEX_URL    – e.g. http://localhost:32400
-    PLEX_TOKEN  – your X-Plex-Token
+    PLEX_URL    - e.g. http://localhost:32400
+    PLEX_TOKEN  - your X-Plex-Token
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ except ImportError:
 
 import configparser
 
-# ── Defaults ────────────────────────────────────────────────────────────────
+# -- Defaults ----------------------------------------------------------------
 
 DEFAULT_PLEX_URL = "http://localhost:32400"
 DEFAULT_LIBRARY = "Movies"
@@ -83,7 +83,7 @@ if os.path.exists(config_path):
 COMMENTARY_KEYWORDS = ["commentary", "director's commentary", "filmmaker commentary"]
 
 
-# ── Data structures ─────────────────────────────────────────────────────────
+# -- Data structures ---------------------------------------------------------
 
 @dataclass
 class ScanResult:
@@ -93,7 +93,7 @@ class ScanResult:
     errors: int = 0
 
 
-# ── Scanning ────────────────────────────────────────────────────────────────
+# -- Scanning ----------------------------------------------------------------
 
 def has_ad_track(item) -> bool:
     """Return True if any audio stream on *item* is flagged visualImpaired."""
@@ -124,7 +124,7 @@ def scan_library(section, *, check_ad: bool, check_commentary: bool) -> ScanResu
     items = section.all()
     total = len(items)
 
-    print(f"\nScanning {total} items in '{section.title}' …\n")
+    print(f"\nScanning {total} items in '{section.title}' ...\n")
     t0 = time.time()
 
     for i, item in enumerate(items, 1):
@@ -142,7 +142,7 @@ def scan_library(section, *, check_ad: bool, check_commentary: bool) -> ScanResu
                 result.commentary_movies.append(item)
         except Exception as exc:
             result.errors += 1
-            print(f"\n  ⚠  Error scanning '{item.title}': {exc}")
+            print(f"\n  [WARNING]  Error scanning '{item.title}': {exc}")
 
         result.total_scanned += 1
 
@@ -152,7 +152,7 @@ def scan_library(section, *, check_ad: bool, check_commentary: bool) -> ScanResu
     return result
 
 
-# ── Collection management ──────────────────────────────────────────────────
+# -- Collection management --------------------------------------------------
 
 def sync_collection(
     section,
@@ -199,7 +199,7 @@ def sync_collection(
                 existing_collection.removeItems(to_remove)
 
     else:
-        # Collection doesn't exist yet – create it by tagging the items
+        # Collection doesn't exist yet - create it by tagging the items
         summary["added"] = [item.title for item in wanted_items]
         if not dry_run:
             for item in wanted_items:
@@ -214,24 +214,24 @@ def sync_collection(
 
 def print_summary(collection_name: str, summary: dict, dry_run: bool):
     prefix = "[DRY RUN] " if dry_run else ""
-    print(f"\n{'─' * 60}")
+    print(f"\n{'-' * 60}")
     print(f"{prefix}Collection: {collection_name}")
-    print(f"{'─' * 60}")
+    print(f"{'-' * 60}")
     if summary["added"]:
         print(f"  + Added ({len(summary['added'])}):")
         for t in sorted(summary["added"]):
-            print(f"      • {t}")
+            print(f"      * {t}")
     if summary["removed"]:
-        print(f"  − Removed ({len(summary['removed'])}):")
+        print(f"  - Removed ({len(summary['removed'])}):")
         for t in sorted(summary["removed"]):
-            print(f"      • {t}")
+            print(f"      * {t}")
     if summary["unchanged"]:
-        print(f"  ✓ Unchanged: {summary['unchanged']}")
+        print(f"  [OK] Unchanged: {summary['unchanged']}")
     if not summary["added"] and not summary["removed"]:
         print("  (no changes)")
 
 
-# ── CLI ─────────────────────────────────────────────────────────────────────
+# -- CLI ---------------------------------------------------------------------
 
 def parse_args():
     p = argparse.ArgumentParser(
@@ -266,14 +266,14 @@ def main():
         sys.exit(1)
 
     if args.no_ad and args.no_commentary:
-        print("ERROR: --no-ad and --no-commentary both set — nothing to do.")
+        print("ERROR: --no-ad and --no-commentary both set -- nothing to do.")
         sys.exit(1)
 
     check_ad = not args.no_ad
     check_commentary = not args.no_commentary
 
     # Connect
-    print(f"Connecting to Plex at {args.url} …")
+    print(f"Connecting to Plex at {args.url} ...")
     plex = PlexServer(args.url, args.token)
     print(f"  Server: {plex.friendlyName}  (v{plex.version})")
 
@@ -281,7 +281,7 @@ def main():
     print(f"  Library: {section.title}  ({section.totalSize} items)")
 
     if args.dry_run:
-        print("\n  *** DRY RUN — no changes will be made ***")
+        print("\n  *** DRY RUN -- no changes will be made ***")
 
     # Scan
     result = scan_library(section, check_ad=check_ad, check_commentary=check_commentary)

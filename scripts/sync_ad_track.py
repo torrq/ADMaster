@@ -443,8 +443,8 @@ def render_main_tracks(ffmpeg_bin, ref_path, base_title, out_dir, scratch_dir, c
 
     if stereo_exists and night_exists and not overwrite:
         print(f"  [SKIP] Main Stereo & Night Mode AAC already exist in output/ (use --overwrite to force re-render):", flush=True)
-        print(f"    ✓ {os.path.basename(out_stereo)} ({os.path.getsize(out_stereo)/(1024*1024):.1f} MB)", flush=True)
-        print(f"    ✓ {os.path.basename(out_night)} ({os.path.getsize(out_night)/(1024*1024):.1f} MB)", flush=True)
+        print(f"    [OK] {os.path.basename(out_stereo)} ({os.path.getsize(out_stereo)/(1024*1024):.1f} MB)", flush=True)
+        print(f"    [OK] {os.path.basename(out_night)} ({os.path.getsize(out_night)/(1024*1024):.1f} MB)", flush=True)
         return
 
     # 2. Extract intermediate stereo WAV in scratch (BS.775 downmix)
@@ -558,10 +558,10 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
         
         if stereo_exists and night_exists and mkv_exists and not overwrite:
             print(f"\n  [SKIP] All AD deliverables for [{name}] already exist in output/ (use --overwrite to force re-render):", flush=True)
-            print(f"    ✓ {os.path.basename(out_stereo)} ({os.path.getsize(out_stereo)/(1024*1024):.1f} MB)", flush=True)
-            print(f"    ✓ {os.path.basename(out_night)} ({os.path.getsize(out_night)/(1024*1024):.1f} MB)", flush=True)
+            print(f"    [OK] {os.path.basename(out_stereo)} ({os.path.getsize(out_stereo)/(1024*1024):.1f} MB)", flush=True)
+            print(f"    [OK] {os.path.basename(out_night)} ({os.path.getsize(out_night)/(1024*1024):.1f} MB)", flush=True)
             if out_mkv and os.path.exists(out_mkv):
-                print(f"    ✓ {os.path.basename(out_mkv)} ({os.path.getsize(out_mkv)/(1024*1024):.1f} MB)", flush=True)
+                print(f"    [OK] {os.path.basename(out_mkv)} ({os.path.getsize(out_mkv)/(1024*1024):.1f} MB)", flush=True)
             continue
             
         # Probe input AD sample rate
@@ -909,7 +909,7 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
         print(f"\n  [SKIP] All {len(expected_outputs)} requested deliverables already exist in output/:")
         for exp in expected_outputs:
             size_mb = os.path.getsize(exp) / (1024 * 1024)
-            print(f"    ✓ {os.path.basename(exp)} ({size_mb:.1f} MB)")
+            print(f"    [OK] {os.path.basename(exp)} ({size_mb:.1f} MB)")
         print(f"\n  Skipping correlation analysis and rendering.")
         print(f"  To force re-analyzing and re-rendering, pass --overwrite (or -f / --force-overwrite).")
         print("================================================================================\n", flush=True)
