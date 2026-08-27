@@ -915,13 +915,34 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
         print("================================================================================\n", flush=True)
         return True
 
-    sync_params = compute_sync_parameters(
-        ffmpeg_bin, ffprobe_bin, ref_path, ad_tracks, target_duration, scratch_dir,
-        ref_stream_map=ref_stream_map,
-        num_anchors=args.anchors, force_stretch=args.force_stretch, no_stretch=args.no_stretch,
-        min_confidence=args.min_confidence, force_dtw=args.force_dtw, no_dtw_fallback=args.no_dtw_fallback,
-        force_pal=args.pal, no_pal=args.no_pal
-    )
+    # Filter AD tracks that actually need to be aligned and rendered
+    needed_ad_tracks = {}
+    for name, p in ad_tracks.items():
+        label_prefix = f"{base_title}-AD" if len(ad_tracks) == 1 else f"{base_title}-AD [{name}]"
+        out_stereo = os.path.join(out_dir, f"{label_prefix} (Stereo){suffix}.m4a")
+        out_night = os.path.join(out_dir, f"{label_prefix} (Night Mode){suffix}.m4a")
+        out_mkv = os.path.join(out_dir, f"{base_title} (Sample Sync Preview {int(render_duration)}s).mkv") if args.mux_video else None
+        
+        stereo_done = os.path.exists(out_stereo) and os.path.getsize(out_stereo) > 1000 and not args.overwrite
+        night_done = os.path.exists(out_night) and os.path.getsize(out_night) > 1000 and not args.overwrite
+        mkv_done = (not args.mux_video) or (os.path.exists(out_mkv) and os.path.getsize(out_mkv) > 1000 and not args.overwrite)
+        
+        if not (stereo_done and night_done and mkv_done):
+            needed_ad_tracks[name] = p
+        else:
+            print(f"  [SKIP] All AD deliverables for [{name}] already exist. Skipping sync & render.", flush=True)
+
+    sync_params = {}
+    if needed_ad_tracks:
+        sync_params = compute_sync_parameters(
+            ffmpeg_bin, ffprobe_bin, ref_path, needed_ad_tracks, target_duration, scratch_dir,
+            ref_stream_map=ref_stream_map,
+            num_anchors=args.anchors, force_stretch=args.force_stretch, no_stretch=args.no_stretch,
+            min_confidence=args.min_confidence, force_dtw=args.force_dtw, no_dtw_fallback=args.no_dtw_fallback,
+            force_pal=args.pal, no_pal=args.no_pal
+        )
+    else:
+        print(f"\n  [INFO] All AD deliverables already exist. Skipping acoustic cross-correlation.", flush=True)
     
     if not args.no_render:
         if args.convert_main:
@@ -931,12 +952,13 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
                 keep_scratch=args.keep_scratch, overwrite=args.overwrite
             )
             
-        render_ad_tracks(
-            ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, sync_params, target_duration,
-            out_dir, scratch_dir, ref_stream_map=ref_stream_map, target_i=args.target_i, target_tp=args.target_tp,
-            preview_sec=args.preview, video_mux_path=args.mux_video,
-            threads=args.threads, keep_scratch=args.keep_scratch, overwrite=args.overwrite
-        )
+        if needed_ad_tracks:
+            render_ad_tracks(
+                ffmpeg_bin, ffprobe_bin, ref_path, base_title, needed_ad_tracks, sync_params, target_duration,
+                out_dir, scratch_dir, ref_stream_map=ref_stream_map, target_i=args.target_i, target_tp=args.target_tp,
+                preview_sec=args.preview, video_mux_path=args.mux_video,
+                threads=args.threads, keep_scratch=args.keep_scratch, overwrite=args.overwrite
+            )
         
     if not args.keep_scratch:
         try:
