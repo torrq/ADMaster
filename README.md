@@ -1,4 +1,4 @@
-<img width="1200" height="350" alt="adsync" src="https://github.com/user-attachments/assets/6afa336b-994f-4c18-b7c2-1115dd16fb93" />
+<img width="1200" height="275" alt="adsync" src="https://github.com/user-attachments/assets/077d4b0a-5649-40b6-af4c-9e76a175a1cf" />
 
 # adsync — Audio Description & Secondary Audio Sync Pipeline
 
