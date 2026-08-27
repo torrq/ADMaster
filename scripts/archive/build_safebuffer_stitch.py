@@ -2,9 +2,9 @@ import numpy as np
 import subprocess
 import os
 
-AD_FILE = r"F:\uploads\TPB\tosync\Trailer Park Boys 1x01 Take Your Little Gun and Get Out of My Trailer Park 70143633 2.0 English - Audio Description.mka"
-MASTER_FILE = r"F:\uploads\TPB\output\clean_master\Trailer Park Boys - S01E01 (Safe Buffer Master).mkv"
-OUT_FILE = r"F:\uploads\TPB\output\clean_master\TPB_Safe_Buffer_AD.wav"
+AD_FILE = r"F:\uploads\Series1\tosync\Series_1x01_AD.mka"
+MASTER_FILE = r"F:\uploads\Series1\output\clean_master\Series - S01E01 (Safe Buffer Master).mkv"
+OUT_FILE = r"F:\uploads\Series1\output\clean_master\Series_Safe_Buffer_AD.wav"
 FFMPEG = r"bin\ffmpeg.exe"
 SR = 48000
 

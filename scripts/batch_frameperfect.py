@@ -5,9 +5,9 @@ import subprocess
 import sys
 
 # Paths
-SOURCE_DIR = r"F:\uploads\TPBX\source"
-SYNC_DIR = r"F:\uploads\TPBX\tosync"
-OUT_DIR = r"F:\uploads\TPBX\output"
+SOURCE_DIR = r"F:\uploads\Series1\source"
+SYNC_DIR = r"F:\uploads\Series1\tosync"
+OUT_DIR = r"F:\uploads\Series1\output"
 FFMPEG = r"bin\ffmpeg.exe"
 SYNC_SCRIPT = r"sync_ad_track.py"
 
@@ -34,7 +34,7 @@ def detect_black_screens(mkv_file):
 
 def get_audio_offsets(mkv_file, mka_file):
     print(f"Running acoustic cross-correlation on {os.path.basename(mkv_file)}...")
-    cmd = ["python", SYNC_SCRIPT, "-r", mkv_file, "-a", mka_file, "-o", OUT_DIR, "-t", "TPB"]
+    cmd = ["python", SYNC_SCRIPT, "-r", mkv_file, "-a", mka_file, "-o", OUT_DIR, "-t", "Series1"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8")
     
     offsets = []
@@ -126,7 +126,7 @@ def main():
             continue
             
         ad_file = ad_matches[0]
-        out_file = os.path.join(OUT_DIR, f"Trailer Park Boys - S01E0{ep_num} (Frame Perfect).mkv")
+        out_file = os.path.join(OUT_DIR, f"Series1 - S01E0{ep_num} (Frame Perfect).mkv")
         
         if os.path.exists(out_file):
             print(f"Skipping {basename}, already processed!")

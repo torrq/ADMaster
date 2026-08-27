@@ -88,5 +88,5 @@ def scan_and_set_commentary(target_dir):
     print("=" * 68)
 
 if __name__ == "__main__":
-    folder = sys.argv[1] if len(sys.argv) > 1 else r"X:\video\TV\Police Squad\Police.Squad.S01.720p.BluRay.DD5.1.x264-decibeL"
+    folder = sys.argv[1] if len(sys.argv) > 1 else r"X:\video\TV\Show_Title\Show.S01.720p.BluRay.DD5.1.x264-Release"
     scan_and_set_commentary(folder)

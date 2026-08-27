@@ -21,13 +21,13 @@ Automatically aligns out-of-sync AD tracks (MP3, AC3, M4A, etc.) to a reference 
 **Example Usage:**
 ```powershell
 # 1. Directory Auto-Discovery (AD sync + Main 5.1 & True 2.0 AAC conversion):
-python scripts/sync_ad_track.py "F:\uploads\queue\Gremlins" --convert-main
+python scripts/sync_ad_track.py "F:\uploads\queue\Movie1" --convert-main
 
 # 2. Specific audio stream with forced DTW alignment (e.g. Theatrical vs Extended Cut):
-python scripts/sync_ad_track.py "F:\uploads\queue\EnterTheDragon" --ref-stream 0:a:1 --force-dtw --no-pal
+python scripts/sync_ad_track.py "F:\uploads\queue\Movie2" --ref-stream 0:a:1 --force-dtw --no-pal
 
 # 3. Fast 3-minute video lip-sync test:
-python scripts/sync_ad_track.py "F:\uploads\queue\Gremlins" --preview 180
+python scripts/sync_ad_track.py "F:\uploads\queue\Movie1" --preview 180
 ```
 
 ### 2. Standalone 2-Pass Converter (`convert_ad_2pass.py`)

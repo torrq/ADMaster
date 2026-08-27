@@ -6,9 +6,9 @@ import argparse
 import sys
 
 # Paths
-SOURCE_DIR = r"F:\uploads\TPB\source"
-SYNC_DIR = r"F:\uploads\TPB\tosync"
-OUT_DIR = r"F:\uploads\TPB\output"
+SOURCE_DIR = r"F:\uploads\Series1\source"
+SYNC_DIR = r"F:\uploads\Series1\tosync"
+OUT_DIR = r"F:\uploads\Series1\output"
 FFMPEG = r"bin\ffmpeg.exe"
 
 # Script paths relative to the script's directory
@@ -38,7 +38,7 @@ def detect_black_screens(mkv_file):
     return regions
 
 def get_audio_offsets(mkv_file, mka_file):
-    cmd = ["python", SYNC_SCRIPT, "-r", mkv_file, "-a", mka_file, "-o", OUT_DIR, "-t", "TPB"]
+    cmd = ["python", SYNC_SCRIPT, "-r", mkv_file, "-a", mka_file, "-o", OUT_DIR, "-t", "Series1"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8")
     
     offsets = []
@@ -105,7 +105,7 @@ def build_filter_graph(regions, gaps, ad_offset):
     return graph
 
 def do_direct_mux(ep_num, mkv_file, ad_file, offset, dry_run=False):
-    out_file = os.path.join(OUT_DIR, f"Trailer Park Boys - S{ep_num[:2]}E{ep_num[2:]} (Direct Mux).mkv")
+    out_file = os.path.join(OUT_DIR, f"Series1 - S{ep_num[:2]}E{ep_num[2:]} (Direct Mux).mkv")
     if os.path.exists(out_file):
         print(f"[{ep_num}] Skipping DIRECT MUX (already exists)")
         return
@@ -136,7 +136,7 @@ def do_direct_mux(ep_num, mkv_file, ad_file, offset, dry_run=False):
     subprocess.run(cmd)
 
 def do_frame_perfect(ep_num, mkv_file, ad_file, regions, gaps, first_offset, dry_run=False):
-    out_file = os.path.join(OUT_DIR, f"Trailer Park Boys - S{ep_num[:2]}E{ep_num[2:]} (Frame Perfect).mkv")
+    out_file = os.path.join(OUT_DIR, f"Series1 - S{ep_num[:2]}E{ep_num[2:]} (Frame Perfect).mkv")
     if os.path.exists(out_file):
         print(f"[{ep_num}] Skipping FRAME PERFECT (already exists)")
         return
@@ -166,7 +166,7 @@ def do_frame_perfect(ep_num, mkv_file, ad_file, regions, gaps, first_offset, dry
     subprocess.run(cmd)
 
 def do_dtw(ep_num, mkv_file, ad_file, dry_run=False):
-    out_file = os.path.join(OUT_DIR, f"Trailer Park Boys - S{ep_num[:2]}E{ep_num[2:]} (DTW Sync).mkv")
+    out_file = os.path.join(OUT_DIR, f"Series1 - S{ep_num[:2]}E{ep_num[2:]} (DTW Sync).mkv")
     if os.path.exists(out_file):
         print(f"[{ep_num}] Skipping DTW SYNC (already exists)")
         return
@@ -298,9 +298,9 @@ def main():
         episode = m.group(2).lstrip("0")
         ep_code = f"{season.zfill(2)}{episode.zfill(2)}"
         
-        out_fp = os.path.join(OUT_DIR, f"Trailer Park Boys - S{ep_code[:2]}E{ep_code[2:]} (Frame Perfect).mkv")
-        out_dm = os.path.join(OUT_DIR, f"Trailer Park Boys - S{ep_code[:2]}E{ep_code[2:]} (Direct Mux).mkv")
-        out_dtw = os.path.join(OUT_DIR, f"Trailer Park Boys - S{ep_code[:2]}E{ep_code[2:]} (DTW Sync).mkv")
+        out_fp = os.path.join(OUT_DIR, f"Series1 - S{ep_code[:2]}E{ep_code[2:]} (Frame Perfect).mkv")
+        out_dm = os.path.join(OUT_DIR, f"Series1 - S{ep_code[:2]}E{ep_code[2:]} (Direct Mux).mkv")
+        out_dtw = os.path.join(OUT_DIR, f"Series1 - S{ep_code[:2]}E{ep_code[2:]} (DTW Sync).mkv")
         if os.path.exists(out_fp) or os.path.exists(out_dm) or os.path.exists(out_dtw):
             print(f"[{ep_code}] Skipping analysis (already synced)")
             continue

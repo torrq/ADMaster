@@ -14,7 +14,7 @@ Overview:
 
 Usage Examples:
   1. Full Directory Auto-Discovery (Source MKV in source/, ADs in tosync/):
-     python scripts/sync_ad_track.py "F:\uploads\queue\Gremlins" --convert-main
+     python scripts/sync_ad_track.py "F:\uploads\queue\Movie1" --convert-main
 
   2. Batch Process All Subdirectories in a Queue:
      python scripts/sync_ad_track.py "F:\uploads\queue" --batch --convert-main
@@ -26,10 +26,10 @@ Usage Examples:
        --convert-main
 
   4. Forced DescribeAlign DTW Piecewise Alignment (for alternate cuts):
-     python scripts/sync_ad_track.py "F:\uploads\queue\EnterTheDragon" --force-dtw --no-pal
+     python scripts/sync_ad_track.py "F:\uploads\queue\Movie2" --force-dtw --no-pal
 
   5. Fast 3-minute Video Test Preview:
-     python scripts/sync_ad_track.py "F:\uploads\queue\Gremlins" --preview 180
+     python scripts/sync_ad_track.py "F:\uploads\queue\Movie1" --preview 180
 """
 
 import argparse
