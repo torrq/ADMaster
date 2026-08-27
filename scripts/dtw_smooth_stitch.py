@@ -47,7 +47,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 BIN_DIR = os.path.join(os.path.dirname(SCRIPT_DIR), "bin")
 
 
-# --- Utilities ----------------------------------------------------------------
+# --- Utilities ----------------------------------------------------------
 
 def find_ffmpeg():
     """Find ffmpeg binary from bin/ or system PATH."""
@@ -103,27 +103,28 @@ def parse_alignment_plot(plot_file):
         m = full_re.search(line)
         if m:
             segments.append({
-                "rate_pct":     float(m.group(1)),
+                "rate_pct": float(m.group(1)),
                 "master_start": time_to_sec(m.group(2)),
-                "master_end":   time_to_sec(m.group(3)),
-                "audio_start":  time_to_sec(m.group(4)),
-                "audio_end":    time_to_sec(m.group(5)),
+                "master_end": time_to_sec(m.group(3)),
+                "audio_start": time_to_sec(m.group(4)),
+                "audio_end": time_to_sec(m.group(5)),
             })
         else:
             m2 = audio_re.search(line)
             if m2:
                 segments.append({
-                    "rate_pct":     0.0,
+                    "rate_pct": 0.0,
                     "master_start": 0.0,
-                    "master_end":   0.0,
-                    "audio_start":  time_to_sec(m2.group(1)),
-                    "audio_end":    time_to_sec(m2.group(2)),
+                    "master_end": 0.0,
+                    "audio_start": time_to_sec(m2.group(1)),
+                    "audio_end": time_to_sec(m2.group(2)),
                 })
 
     cleaned = []
     for s in segments:
         dur_master = s["master_end"] - s["master_start"]
-        # Filter out extreme micro-glitches (e.g. 7407% rate jump over 0.07 seconds)
+        # Filter out extreme micro-glitches (e.g. 7407% rate jump over 0.07
+        # seconds)
         if dur_master < 0.25 and abs(s["rate_pct"]) > 50.0:
             continue
         cleaned.append(s)
@@ -131,7 +132,7 @@ def parse_alignment_plot(plot_file):
     return cleaned if cleaned else segments
 
 
-# --- Audio I/O ----------------------------------------------------------------
+# --- Audio I/O ----------------------------------------------------------
 
 def predecode_to_pcm(input_audio, output_wav, ffmpeg, sample_rate=48000):
     """
@@ -144,9 +145,16 @@ def predecode_to_pcm(input_audio, output_wav, ffmpeg, sample_rate=48000):
         "-vn", "-af", "asetpts=PTS-STARTPTS", "-ar", str(sample_rate),
         "-c:a", "pcm_s16le", "-f", "wav", tmp,
     ]
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE)
     if result.returncode != 0:
-        raise RuntimeError(f"FFmpeg decode failed:\n{result.stderr.decode('utf-8', errors='ignore')}")
+        raise RuntimeError(
+            f"FFmpeg decode failed:\n{
+                result.stderr.decode(
+                    'utf-8',
+                    errors='ignore')}")
     os.replace(tmp, output_wav)
 
 
@@ -166,13 +174,15 @@ def load_wav(wav_path):
         raw_bytes = np.frombuffer(raw, dtype=np.uint8)
         arr = np.zeros(len(raw_bytes) // 3, dtype=np.float32)
         for i in range(len(arr)):
-            b = raw_bytes[i * 3 : i * 3 + 3]
+            b = raw_bytes[i * 3: i * 3 + 3]
             val = b[0] | (b[1] << 8) | (b[2] << 16)
             if val >= 0x800000:
                 val -= 0x1000000
             arr[i] = val / 8388608.0
     elif width == 4:
-        arr = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
+        arr = np.frombuffer(
+            raw, dtype=np.int32).astype(
+            np.float32) / 2147483648.0
     else:
         raise ValueError(f"Unsupported sample width: {width}")
 
@@ -187,18 +197,15 @@ def write_wav(samples, sr, output_path):
     clipped = np.clip(samples, -1.0, 1.0)
     pcm = (clipped * 32767).astype(np.int16)
     channels = samples.shape[1] if samples.ndim > 1 else 1
-    
+
     if samples.ndim > 1:
         pcm = pcm.flatten()
-        
+
     with wave.open(output_path, "wb") as wf:
         wf.setnchannels(channels)
         wf.setsampwidth(2)
         wf.setframerate(sr)
         wf.writeframes(pcm.tobytes())
-
-
-
 
 
 # --- Layer 1: VAD-Aware Cut Nudging ------------------------------------------
@@ -253,7 +260,7 @@ def find_silence(samples, sr, origin, direction,
         if idx < 0 or idx + win_samples > len(samples):
             break
 
-        chunk = samples[idx : idx + win_samples]
+        chunk = samples[idx: idx + win_samples]
         if rms_energy(chunk) <= threshold:
             if silent_run == 0:
                 first_silent_pos = idx if direction > 0 else idx + win_samples
@@ -289,7 +296,7 @@ def vad_nudge_boundaries(segments_samples, samples, sr,
                 if nudged != seg_end:
                     delta_ms = (nudged - seg_end) / sr * 1000
                     nudge_log.append(
-                        f"  [VAD] Seg {i+1} end: extended +{delta_ms:.0f}ms "
+                        f"  [VAD] Seg {i + 1} end: extended +{delta_ms:.0f}ms "
                         f"to protect speech tail"
                     )
                     new_end = nudged
@@ -303,7 +310,8 @@ def vad_nudge_boundaries(segments_samples, samples, sr,
                 if nudged != seg_start:
                     delta_ms = (seg_start - nudged) / sr * 1000
                     nudge_log.append(
-                        f"  [VAD] Seg {i+1} start: pulled back -{delta_ms:.0f}ms "
+                        f"  [VAD] Seg {i +
+                                       1} start: pulled back -{delta_ms:.0f}ms "
                         f"to protect speech head"
                     )
                     new_start = nudged
@@ -330,7 +338,7 @@ def snap_zero_crossing(samples, sample_idx, radius_ms=2, sr=48000):
 
     mono_region = region[:, 0] if region.ndim > 1 else region
     crossings = np.where(np.diff(np.signbit(mono_region)))[0]
-    
+
     if len(crossings) == 0:
         return sample_idx
 
@@ -359,17 +367,23 @@ def crossfade_stitch(segments_audio, crossfade_samples):
     xf = crossfade_samples
     t = np.linspace(0, 1, xf, dtype=np.float32)
     fade_out = np.cos(t * np.pi / 2)   # 1 -> 0
-    fade_in  = np.sin(t * np.pi / 2)   # 0 -> 1
-    
+    fade_in = np.sin(t * np.pi / 2)   # 0 -> 1
+
     if segments_audio[0].ndim == 2:
         fade_out = fade_out[:, np.newaxis]
         fade_in = fade_in[:, np.newaxis]
 
     # Calculate total output length
-    total = sum(len(s) for s in segments_audio) - xf * (len(segments_audio) - 1)
-    
+    total = sum(len(s) for s in segments_audio) - \
+        xf * (len(segments_audio) - 1)
+
     if segments_audio[0].ndim == 2:
-        output = np.zeros((max(total, 0), segments_audio[0].shape[1]), dtype=np.float32)
+        output = np.zeros(
+            (max(
+                total,
+                0),
+                segments_audio[0].shape[1]),
+            dtype=np.float32)
     else:
         output = np.zeros(max(total, 0), dtype=np.float32)
 
@@ -388,7 +402,7 @@ def crossfade_stitch(segments_audio, crossfade_samples):
         # Overlap-add into output
         end_pos = min(pos + len(seg), len(output))
         write_len = end_pos - pos
-        output[pos : pos + write_len] += seg[:write_len]
+        output[pos: pos + write_len] += seg[:write_len]
 
         # Advance position (minus overlap for next segment)
         if i < len(segments_audio) - 1:
@@ -418,27 +432,35 @@ def smooth_stitch_audio(segments, samples, sr,
     # -------------------------------------------------------------------------
     # Layer 0: DescribeAlign Wobble Filtering
     # -------------------------------------------------------------------------
-    print("\n  Layer 0: Filtering DTW Hallucinations (Wobble Correction)...", flush=True)
+    print(
+        "\n  Layer 0: Filtering DTW Hallucinations (Wobble Correction)...",
+        flush=True)
     filtered_segments = []
     current_offset = segments[0]["master_start"] - segments[0]["audio_start"]
-    
+
     for i, seg in enumerate(segments):
         audio_dur = seg["audio_end"] - seg["audio_start"]
         master_dur = seg["master_end"] - seg["master_start"]
         target_offset = seg["master_end"] - seg["audio_end"]
-        
+
         if abs(target_offset - current_offset) > 0.05:
             if audio_dur > 2.0 and master_dur > 2.0:
-                print(f"  [WOBBLE DETECTED] Seg {i+1}: Ignoring offset shift to {target_offset:+.3f}s, maintaining {current_offset:+.3f}s", flush=True)
+                print(
+                    f"  [WOBBLE DETECTED] Seg {
+                        i +
+                        1}: Ignoring offset shift to {
+                        target_offset:+.3f}s, maintaining {
+                        current_offset:+.3f}s",
+                    flush=True)
             else:
                 current_offset = target_offset
-                
+
         # Force the segment to conform to the current true offset
         seg["audio_start"] = seg["master_start"] - current_offset
         seg["audio_end"] = seg["master_end"] - current_offset
         seg["rate_pct"] = 0.0
         filtered_segments.append(seg)
-        
+
     segments = filtered_segments
 
     xf_samples = int(sr * crossfade_ms / 1000.0)
@@ -468,53 +490,62 @@ def smooth_stitch_audio(segments, samples, sr,
     snapped = []
     zc_count = 0
     for i, (s, e) in enumerate(nudged):
-        new_s = snap_zero_crossing(samples, s, radius_ms=2, sr=sr) if i > 0 else s
-        new_e = snap_zero_crossing(samples, e, radius_ms=2, sr=sr) if i < len(nudged) - 1 else e
+        new_s = snap_zero_crossing(
+            samples, s, radius_ms=2, sr=sr) if i > 0 else s
+        new_e = snap_zero_crossing(
+            samples, e, radius_ms=2, sr=sr) if i < len(nudged) - 1 else e
         if new_s != s or new_e != e:
             zc_count += 1
         snapped.append((new_s, new_e))
-    print(f"  [ZC] Snapped {zc_count}/{len(snapped)} boundary pairs to zero crossings")
+    print(
+        f"  [ZC] Snapped {zc_count}/{len(snapped)} boundary pairs to zero crossings")
 
     # -- Layer 3: Absolute Timeline Placement & Equal-Power Crossfade --
     print(f"\n  Layer 3: Absolute Timeline Placement & Crossfade ({crossfade_ms}ms, "
           f"{xf_samples} samples)")
-          
+
     duration_s = max(seg["master_end"] for seg in segments)
-    canvas_len = int(duration_s * sr) + int(sr * 10)  # 10s extra padding just in case
+    # 10s extra padding just in case
+    canvas_len = int(duration_s * sr) + int(sr * 10)
     channels = samples.shape[1] if samples.ndim > 1 else 1
     canvas = np.zeros((canvas_len, channels), dtype=np.float32)
-    
+
     t = np.linspace(0, 1, xf_samples, dtype=np.float32)
     fade_out = (np.cos(t * np.pi / 2) ** 2)
     fade_in = (np.sin(t * np.pi / 2) ** 2)
-        
+
     for i, (s, e) in enumerate(snapped):
         seg = segments[i]
         master_s = int(seg["master_start"] * sr)
-        
-        # Extend e by xf_samples if not the last segment, so it overlaps with the next
+
+        # Extend e by xf_samples if not the last segment, so it overlaps with
+        # the next
         if i < len(snapped) - 1:
             e = min(len(samples), e + xf_samples)
-            
+
         audio = samples[s:e].copy()
-            
+
         if canvas.ndim > 1 and audio.ndim == 1:
             audio = audio[:, np.newaxis]
         elif canvas.ndim == 1 and audio.ndim > 1:
             audio = audio.squeeze()
-            
+
         f_in = fade_in[:, np.newaxis] if audio.ndim == 2 else fade_in.ravel()
-        f_out = fade_out[:, np.newaxis] if audio.ndim == 2 else fade_out.ravel()
-        
+        f_out = fade_out[:,
+                         np.newaxis] if audio.ndim == 2 else fade_out.ravel()
+
         # Apply equal-power crossfades
         if i > 0 and len(audio) >= xf_samples:
             audio[:xf_samples] = audio[:xf_samples] * f_in
         if i < len(snapped) - 1 and len(audio) >= xf_samples:
             audio[-xf_samples:] = audio[-xf_samples:] * f_out
-            
+
         write_e = min(master_s + len(audio), canvas_len)
         read_e = write_e - master_s
-        print(f"[DEBUG] Seg {i}: master_s={master_s}, write_e={write_e}, audio_len={len(audio)}, read_e={read_e}", flush=True)
+        print(
+            f"[DEBUG] Seg {i}: master_s={master_s}, write_e={write_e}, audio_len={
+                len(audio)}, read_e={read_e}",
+            flush=True)
         if read_e > 0:
             canvas[master_s:write_e] += audio[:read_e]
 
@@ -556,7 +587,7 @@ def run_smooth_stitch(plot_file, input_audio, output_audio,
     for i, seg in enumerate(segments):
         dur = seg["audio_end"] - seg["audio_start"]
         rate_str = f" (rate: +{seg['rate_pct']:.1f}%)" if seg["rate_pct"] > 0 else ""
-        print(f"    Seg {i+1}: AD [{fmt_time(seg['audio_start'])} -> "
+        print(f"    Seg {i + 1}: AD [{fmt_time(seg['audio_start'])} -> "
               f"{fmt_time(seg['audio_end'])}] ({dur:.3f}s){rate_str}")
 
     # -- Scratch directory --
@@ -569,7 +600,9 @@ def run_smooth_stitch(plot_file, input_audio, output_audio,
     analysis_wav = os.path.join(scratch_dir, f"{basename}_pcm48k.wav")
 
     if os.path.exists(analysis_wav) and os.path.getsize(analysis_wav) > 1000:
-        print(f"\n  Using cached analysis WAV: {os.path.basename(analysis_wav)}")
+        print(
+            f"\n  Using cached analysis WAV: {
+                os.path.basename(analysis_wav)}")
     else:
         print(f"\n  Pre-decoding to PCM 48kHz WAV...")
         predecode_to_pcm(input_audio, analysis_wav, ffmpeg, sample_rate=48000)
@@ -593,7 +626,10 @@ def run_smooth_stitch(plot_file, input_audio, output_audio,
     )
 
     out_duration = len(stitched) / sr
-    print(f"\n  Stitched result: {out_duration:.1f}s ({len(stitched):,} samples)")
+    print(
+        f"\n  Stitched result: {
+            out_duration:.1f}s ({
+            len(stitched):,        } samples)")
 
     # -- Write intermediate WAV --
     raw_wav = os.path.join(scratch_dir, f"{basename}_stitched_raw.wav")
@@ -601,12 +637,12 @@ def run_smooth_stitch(plot_file, input_audio, output_audio,
 
     # -- Encode to final format --
     print(f"\n  Encoding final output tracks...")
-    
+
     ext = os.path.splitext(output_audio)[1].lower()
     base_out = os.path.splitext(output_audio)[0]
-    
+
     output_standard = f"{base_out}{ext}"
-    
+
     if ext in (".m4a", ".aac"):
         codec = ["-c:a", "aac", "-b:a", "256k"]
     elif ext == ".ac3":
@@ -625,15 +661,21 @@ def run_smooth_stitch(plot_file, input_audio, output_audio,
         "-vn",
         output_standard,
     ]
-    
+
     # Encode Night Mode (Normalized EBU R128)
-        
+
     for cmd, name in [(encode_std_cmd, "Standard")]:
         print(f"    -> Encoding {name} track...")
         print(f"       COMMAND: {' '.join(cmd)}")
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        res = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE)
         if res.returncode != 0:
-            raise RuntimeError(f"FFmpeg encode failed for {name}:\n{res.stderr.decode('utf-8', errors='ignore')}")
+            raise RuntimeError(
+                f"FFmpeg encode failed for {name}:\n{
+                    res.stderr.decode(
+                        'utf-8', errors='ignore')}")
 
     print(f"\n  [SUCCESS] Smooth-stitched outputs:")
     print(f"    - {output_standard}")
@@ -660,9 +702,15 @@ Examples:
   python dtw_smooth_stitch.py alignment.txt AD.mka output.m4a --crossfade-ms 25
 """,
     )
-    parser.add_argument("plot_file", help="describealign alignment plot .txt file")
-    parser.add_argument("input_audio", help="Source AD audio file (any format)")
-    parser.add_argument("output_audio", help="Output stitched audio (.m4a, .ac3, .flac)")
+    parser.add_argument(
+        "plot_file",
+        help="describealign alignment plot .txt file")
+    parser.add_argument(
+        "input_audio",
+        help="Source AD audio file (any format)")
+    parser.add_argument(
+        "output_audio",
+        help="Output stitched audio (.m4a, .ac3, .flac)")
     parser.add_argument("--crossfade-ms", type=int, default=50,
                         help="Crossfade duration in ms (default: 50)")
     parser.add_argument("--vad-search-ms", type=int, default=500,
