@@ -360,16 +360,23 @@ def compute_sync_parameters(ffmpeg_bin, ffprobe_bin, base_path, ad_tracks, targe
         else:
             print(f"  [{name}] Native rate (1.000000x) enforced.", flush=True)
             
-        # Check if runner-up clusters have high confidence (>= 25%) and significant offset delta (> 0.20s)
-        has_drifting_high_conf_clusters = False
+        # 1. Consensus Quorum Check: A single isolated anchor (e.g. 1/100 or < 3% of timeline)
+        # without overwhelming peak confidence (>= 0.40) is acoustic noise/false-positive, not consensus.
+        min_quorum = max(3, int(len(measurements) * 0.03))
+        has_insufficient_quorum = (winner_count < min_quorum and best_overall_confidence < 0.40)
+
+        # 2. Drifting Multi-Cluster Check: Distinct offset clusters with significant delta (> 0.20s)
+        has_drifting_clusters = False
         for r_off, r_peak, r_count in candidates[1:5]:
-            if r_peak >= 0.25 and abs(r_off - init_offset) > 0.20:
-                has_drifting_high_conf_clusters = True
+            if r_peak >= min_confidence and abs(r_off - init_offset) > 0.20 and (r_count >= 2 or r_peak >= 0.25):
+                has_drifting_clusters = True
                 break
 
-        if (best_overall_confidence < min_confidence or has_drifting_high_conf_clusters) and not no_dtw_fallback:
-            if has_drifting_high_conf_clusters:
-                print(f"\n  [WARNING] Multiple distinct high-confidence offset clusters detected across timeline (drifting offsets/reel changes).", flush=True)
+        if (best_overall_confidence < min_confidence or has_insufficient_quorum or has_drifting_clusters) and not no_dtw_fallback:
+            if has_drifting_clusters:
+                print(f"\n  [WARNING] Multiple distinct offset clusters detected across timeline (drifting offsets / reel changes / structural cuts).", flush=True)
+            elif has_insufficient_quorum:
+                print(f"\n  [WARNING] Insufficient anchor consensus: Only {winner_count}/{len(measurements)} anchors agreed on winner offset with {best_overall_confidence*100:.1f}% peak confidence (< {min_quorum} anchors required for quorum).", flush=True)
             else:
                 print(f"\n  [WARNING] Max correlation confidence is only {best_overall_confidence*100:.1f}% (< {min_confidence*100:.1f}%) with erratic offsets.", flush=True)
             print(f"  [DIAGNOSTIC] Cut/version mismatch or structural edits detected for [{name}].", flush=True)
