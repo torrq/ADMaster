@@ -159,4 +159,4 @@ See `scripts/README.md` for the full scripts index.
 ## 5. Standard Paths
 * **Project scripts**: `scripts\`
 * **DescribeAlign**: `describealign.py`
-* **FFmpeg binaries**: `AudioDescriptionStuff\bin\` (auto-resolved by Python scripts)
+* **FFmpeg binaries**: `adsync\bin\` (auto-resolved by Python scripts)

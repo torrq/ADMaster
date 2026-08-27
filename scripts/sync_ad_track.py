@@ -4,7 +4,7 @@ r"""
 Universal Audio Description (AD) & Main Audio Sync & Encoding Pipeline
 ================================================================================
 Author: Antigravity AI Pair Programmer
-Repository: AudioDescriptionStuff
+Repository: adsync
 
 Overview:
   High-performance acoustic cross-correlation alignment, DescribeAlign Dynamic

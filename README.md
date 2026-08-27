@@ -1,4 +1,4 @@
-# Audio Description Processing Pipeline
+# adsync — Audio Description & Secondary Audio Sync Pipeline
 
 This repository contains robust, automated Python scripts for processing, synchronizing, and loudness-normalizing Audio Description (AD) tracks for movies and TV shows.
 
