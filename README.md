@@ -1,3 +1,5 @@
+<img width="1200" height="275" alt="adsync" src="https://github.com/user-attachments/assets/077d4b0a-5649-40b6-af4c-9e76a175a1cf" />
+
 # adsync — Audio Description & Secondary Audio Sync Pipeline
 
 This repository contains robust, automated Python scripts for processing, synchronizing, and loudness-normalizing Audio Description (AD) tracks for movies and TV shows.
