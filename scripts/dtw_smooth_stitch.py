@@ -141,8 +141,8 @@ def predecode_to_pcm(input_audio, output_wav, ffmpeg, sample_rate=48000):
     """
     tmp = output_wav.replace(".wav", "_tmp.wav")
     cmd = [
-        ffmpeg, "-y", "-nostdin", "-i", input_audio,
-        "-vn", "-ar", str(sample_rate),
+        ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "warning", "-fflags", "+genpts", "-i", input_audio,
+        "-vn", "-af", "asetpts=PTS-STARTPTS", "-ar", str(sample_rate),
         "-c:a", "pcm_s16le", "-f", "wav", tmp,
     ]
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

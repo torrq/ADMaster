@@ -189,11 +189,11 @@ def predecode_to_mono_8k(ffmpeg_bin, input_path, scratch_dir, label, stream_map=
                 pass
                 
     print(f"  [{label}] Pre-decoding stream to 8kHz mono analysis WAV: {os.path.basename(input_path)}...", flush=True)
-    cmd = [ffmpeg_bin, "-y", "-nostdin", "-i", input_path]
+    cmd = [ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "warning", "-fflags", "+genpts", "-i", input_path]
     if stream_map:
         cmd.extend(["-map", stream_map])
         
-    af_chain = []
+    af_chain = ["asetpts=PTS-STARTPTS"]
     if is_pal:
         pal_rate = float(input_sr) * (23.976023976 / 25.0)
         af_chain.append(f"asetrate={pal_rate:.3f}")
@@ -435,15 +435,15 @@ def render_main_tracks(ffmpeg_bin, ref_path, base_title, out_dir, scratch_dir, c
     # 2. Extract intermediate stereo WAV in scratch (BS.775 downmix)
     stereo_wav = os.path.join(scratch_dir, "main_stereo_temp.wav")
     print(f"  Extracting intermediate True 2.0 Stereo WAV (ITU-R BS.775 downmix)...", flush=True)
-    cmd_wav = [ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "warning", "-threads", str(threads), "-i", ref_path]
+    cmd_wav = [ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "warning", "-threads", str(threads), "-fflags", "+genpts", "-i", ref_path]
     if stream_map:
         cmd_wav.extend(["-map", stream_map])
     if preview_sec:
         cmd_wav.extend(["-t", f"{preview_sec:.3f}"])
     if channels >= 6:
-        cmd_wav.extend(["-af", f"{pan_stereo},aresample=48000", "-ac", "2", "-c:a", "pcm_s16le", stereo_wav])
+        cmd_wav.extend(["-af", f"asetpts=PTS-STARTPTS,{pan_stereo},aresample=48000", "-ac", "2", "-c:a", "pcm_s16le", stereo_wav])
     else:
-        cmd_wav.extend(["-af", "aresample=48000", "-ac", "2", "-c:a", "pcm_s16le", stereo_wav])
+        cmd_wav.extend(["-af", "asetpts=PTS-STARTPTS,aresample=48000", "-ac", "2", "-c:a", "pcm_s16le", stereo_wav])
     
     res_wav = subprocess.run(cmd_wav, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if res_wav.returncode != 0:
@@ -552,22 +552,22 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                 ref_da_wav = os.path.join(scratch_dir, "ref_analysis_48k_mono.wav")
                 if not (os.path.exists(ref_da_wav) and os.path.getsize(ref_da_wav) > 1000):
                     print(f"  Pre-decoding Reference Audio to 48kHz mono WAV for DescribeAlign...", flush=True)
-                    cmd_ref_wav = [ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "warning", "-threads", str(threads), "-i", ref_path]
+                    cmd_ref_wav = [ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "warning", "-threads", str(threads), "-fflags", "+genpts", "-i", ref_path]
                     if ref_stream_map:
                         cmd_ref_wav.extend(["-map", ref_stream_map])
-                    cmd_ref_wav.extend(["-vn", "-ar", "48000", "-ac", "1", "-c:a", "pcm_s16le", ref_da_wav])
+                    cmd_ref_wav.extend(["-vn", "-af", "asetpts=PTS-STARTPTS,aresample=48000", "-ac", "1", "-c:a", "pcm_s16le", ref_da_wav])
                     subprocess.run(cmd_ref_wav)
                     
                 # Pre-decode AD mono WAV for DescribeAlign (applying dynamic sample rate PAL slowdown if PAL)
                 ad_da_wav = os.path.join(scratch_dir, f"{name}_analysis_48k_mono.wav")
                 if not (os.path.exists(ad_da_wav) and os.path.getsize(ad_da_wav) > 1000):
                     print(f"  Pre-decoding AD Audio to 48kHz mono WAV for DescribeAlign (PAL={is_pal})...", flush=True)
-                    cmd_ad_wav = [ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "warning", "-threads", str(threads), "-i", path, "-vn"]
+                    cmd_ad_wav = [ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "warning", "-threads", str(threads), "-fflags", "+genpts", "-i", path, "-vn"]
                     if is_pal:
                         pal_rate = float(ad_sr) * (23.976023976 / 25.0)
-                        cmd_ad_wav.extend(["-af", f"asetrate={pal_rate:.3f},aresample=48000:resampler=soxr:precision=28"])
+                        cmd_ad_wav.extend(["-af", f"asetpts=PTS-STARTPTS,asetrate={pal_rate:.3f},aresample=48000:resampler=soxr:precision=28"])
                     else:
-                        cmd_ad_wav.extend(["-af", "aresample=48000:resampler=soxr:precision=28"])
+                        cmd_ad_wav.extend(["-af", "asetpts=PTS-STARTPTS,aresample=48000:resampler=soxr:precision=28"])
                     cmd_ad_wav.extend(["-ac", "1", "-c:a", "pcm_s16le", ad_da_wav])
                     subprocess.run(cmd_ad_wav)
                 
@@ -665,27 +665,29 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
         temp_wav = os.path.join(scratch_dir, f"{name}_synced_temp.wav")
         print(f"  Pre-rendering synced PCM WAV for [{name}]...", flush=True)
         
-        wav_filters = []
+        wav_filters = ["asetpts=PTS-STARTPTS"]
         if is_pal:
             pal_rate = float(ad_sr) * (23.976023976 / 25.0)
-            wav_filters.append(f"asetrate={pal_rate:.3f}")
-            wav_filters.append("aresample=48000:resampler=soxr:precision=28")
+            wav_filters.append(f"asetrate={pal_rate:.8f}")
+            wav_filters.append("aresample=48000")
         else:
-            wav_filters.append("aresample=48000:resampler=soxr:precision=28")
             if abs(atempo - 1.0) > 0.00001:
                 wav_filters.append(f"atempo={atempo:.8f}")
                 
-        if offset < 0:
+        if offset > 0:
+            wav_filters.append(f"atrim=start={offset:.3f}")
+            wav_filters.append("asetpts=PTS-STARTPTS")
+        elif offset < 0:
             delay_ms = int(abs(offset) * 1000)
             wav_filters.append(f"adelay={delay_ms}:all=1")
             
-        cmd_wav = [ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "warning", "-threads", str(threads)]
-        if offset > 0:
-            cmd_wav.extend(["-ss", f"{offset:.3f}"])
+        cmd_wav = [
+            ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "warning",
+            "-threads", str(threads), "-fflags", "+genpts", "-i", path
+        ]
         if preview_sec:
             cmd_wav.extend(["-t", f"{preview_sec:.3f}"])
         cmd_wav.extend([
-            "-i", path,
             "-vn", "-af", ",".join(wav_filters),
             "-ac", "2", "-c:a", "pcm_s16le", temp_wav
         ])
