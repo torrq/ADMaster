@@ -51,21 +51,45 @@ except ImportError:
     def fftconvolve(a, b, mode='valid'):
         return np.correlate(a, b, mode=mode)
 
+def load_config():
+    """Loads configuration from config.local.json, config.json, or config.default.json."""
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates = [
+        os.path.join(base_dir, "config.local.json"),
+        os.path.join(base_dir, "config.json"),
+        os.path.join(base_dir, "config.default.json")
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            try:
+                with open(c, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+    return {}
+
+CONFIG = load_config()
+
 # Portable local FFmpeg fallback
-DEFAULT_FFMPEG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "ffmpeg.exe")
+DEFAULT_FFMPEG = CONFIG.get("ffmpeg_path") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "ffmpeg.exe")
 if not os.path.exists(DEFAULT_FFMPEG):
     DEFAULT_FFMPEG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin", "ffmpeg.exe")
 if not os.path.exists(DEFAULT_FFMPEG):
     DEFAULT_FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
 
 
-def find_describealign():
-    """Find describealign.py from project directories, siblings, or PATH."""
+def find_describealign(cfg=None):
+    """Find describealign.py from config, project directories, siblings, or PATH."""
+    cfg = cfg or CONFIG
+    custom_path = cfg.get("describealign_path")
+    if custom_path and os.path.exists(custom_path):
+        return os.path.abspath(custom_path)
+        
     candidates = [
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "describealign.py"),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "describealign.py"),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "describealign", "describealign.py"),
-        r"C:\Users\nathan\Projects\git\describealign\describealign.py",
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "describealign", "describealign.py"),
         "describealign.py"
     ]
     for c in candidates:
@@ -79,7 +103,10 @@ def find_describealign():
 
 def locate_binaries(ffmpeg_path):
     """Ensure ffmpeg and ffprobe binaries are located and executable."""
-    if ffmpeg_path and os.path.exists(ffmpeg_path):
+    custom_ffprobe = CONFIG.get("ffprobe_path")
+    if custom_ffprobe and os.path.exists(custom_ffprobe):
+        ffprobe_path = custom_ffprobe
+    elif ffmpeg_path and os.path.exists(ffmpeg_path):
         ffprobe_path = os.path.join(os.path.dirname(ffmpeg_path), "ffprobe.exe" if os.name == 'nt' else "ffprobe")
         if not os.path.exists(ffprobe_path):
             ffprobe_path = shutil.which("ffprobe") or "ffprobe"
@@ -873,7 +900,7 @@ EBU R128 loudness normalization, and MKV sample multiplexing.
     parser.add_argument("-p", "--preview", type=float, nargs="?", const=300.0, default=None, help="Fast sync test: Render short preview sample (Default: 300s)")
     parser.add_argument("--convert-main", action="store_true", help="Also convert and downmix reference main audio (Surround AC3, True 2.0 Stereo AAC, Night Mode AAC)")
     parser.add_argument("--no-render", action="store_true", help="Calculate sync parameters only, do not render output files")
-    parser.add_argument("--anchors", type=int, default=100, help="Number of correlation analysis anchors across timeline (Default: 100)")
+    parser.add_argument("--anchors", type=int, default=CONFIG.get("default_anchors", 100), help="Number of correlation analysis anchors across timeline (Default: 100)")
     parser.add_argument("--no-stretch", action="store_true", help="Force native 1.0x speed rate without speed stretch")
     parser.add_argument("--force-stretch", action="store_true", help="Force 2-point closing cross-correlation speed stretch search")
     parser.add_argument("--pal", action="store_true", help="Explicitly apply dynamic sample-rate PAL 25fps -> 23.976fps slowdown")
@@ -881,9 +908,9 @@ EBU R128 loudness normalization, and MKV sample multiplexing.
     parser.add_argument("--min-confidence", type=float, default=0.15, help="Minimum peak confidence threshold before triggering DTW fallback (Default: 0.15 / 15%%)")
     parser.add_argument("--force-dtw", action="store_true", help="Force DescribeAlign DTW alignment instead of cross-correlation")
     parser.add_argument("--no-dtw-fallback", action="store_true", help="Disable automatic DescribeAlign DTW fallback on low confidence")
-    parser.add_argument("--target-i", type=float, default=-16.0, help="Target EBU R128 integrated loudness in LUFS (Default: -16.0)")
-    parser.add_argument("--target-tp", type=float, default=-1.5, help="Target true-peak ceiling in dB (Default: -1.5)")
-    parser.add_argument("--threads", type=int, default=2, help="Number of CPU threads for FFmpeg encoding (Default: 2)")
+    parser.add_argument("--target-i", type=float, default=CONFIG.get("default_target_i", -16.0), help="Target EBU R128 integrated loudness in LUFS (Default: -16.0)")
+    parser.add_argument("--target-tp", type=float, default=CONFIG.get("default_target_tp", -1.5), help="Target true-peak ceiling in dB (Default: -1.5)")
+    parser.add_argument("--threads", type=int, default=CONFIG.get("default_threads", 2), help="Number of CPU threads for FFmpeg encoding (Default: 2)")
     parser.add_argument("--scratch-dir", default=None, help="Directory for temporary analysis files (Defaults to <movie_dir>/scratch)")
     parser.add_argument("--keep-scratch", action="store_true", help="Do not delete temporary analysis WAVs on completion")
     parser.add_argument("--ffmpeg", default=DEFAULT_FFMPEG, help="Path to ffmpeg executable")

@@ -1,0 +1,9 @@
+{
+  "ffmpeg_path": "",
+  "ffprobe_path": "",
+  "describealign_path": "",
+  "default_threads": 2,
+  "default_target_i": -16.0,
+  "default_target_tp": -1.5,
+  "default_anchors": 100
+}

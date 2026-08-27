@@ -82,10 +82,24 @@ Both alignment methods serve complementary purposes depending on release charact
 Please refer to `scripts/README.md` for a comprehensive, up-to-date index of all core pipeline, prototyping, and legacy scripts included in this repository.
 
 ## Setup & Portability
-This tool is self-contained. 
-1. Create a `bin/` folder in this directory.
-2. Drop `ffmpeg.exe` and `ffprobe.exe` inside.
-3. Run the scripts using Python 3.x with `numpy` installed.
+This tool is self-contained and requires zero hardcoded paths. 
+1. Create a `bin/` folder in this directory and drop `ffmpeg.exe` and `ffprobe.exe` inside (or ensure they are on your system `PATH`).
+2. Run the scripts using Python 3.x with `numpy` and `scipy` installed.
+
+### Optional Local Configuration (`config.local.json`)
+You can customize binary paths, default threads, and targets without modifying scripts:
+1. Copy `config.default.json` to `config.local.json` (which is `.gitignore`d).
+2. Override any paths or defaults:
+```json
+{
+  "ffmpeg_path": "C:\\Tools\\ffmpeg\\ffmpeg.exe",
+  "ffprobe_path": "C:\\Tools\\ffmpeg\\ffprobe.exe",
+  "describealign_path": "C:\\Tools\\describealign\\describealign.py",
+  "default_threads": 4,
+  "default_target_i": -16.0,
+  "default_target_tp": -1.5
+}
+```
 
 ## BatchEncoder Integration
 For GUI-based bulk processing, this project pairs excellently with **BatchEncoder**. We maintain a custom `FFMPEG_BLURAY_AAC.xml` format preset that replicates these exact downmix and loudness matrices (via a 1-pass approximation) directly inside the BatchEncoder UI.
