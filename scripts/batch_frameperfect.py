@@ -168,7 +168,7 @@ def main():
             "-map", "[a_out_master]",
             "-map", "[a_out_ad]",
             "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-            "-c:a:0", "ac3", "-b:a:0", "384k",
+            "-c:a:0", "ac3", "-b:a:0", "640k",
             "-metadata:s:a:0", "language=eng", "-metadata:s:a:0", "title=Main, Stereo", "-disposition:a:0", "default",
             "-c:a:1", "aac", "-b:a:1", "256k", "-ar:a:1", "48000",
             "-metadata:s:a:1", "language=eng", "-metadata:s:a:1", "title=AD, Stereo", "-disposition:a:1", "visual_impaired",

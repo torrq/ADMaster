@@ -8,23 +8,26 @@ It is designed to be fully portable on Windows. Simply place `ffmpeg.exe` and `f
 
 ### 1. Universal Acoustic Sync & Main Audio Conversion (`sync_ad_track.py`)
 Automatically aligns out-of-sync AD tracks (MP3, AC3, M4A, etc.) to a reference movie audio track and optionally converts/downmixes main audio in a single pass.
+* **Directory Auto-Discovery:** Point to any folder containing `source/` (reference MKV/audio) and `tosync/` (AD MP3s/M4As), and the tool automatically pairs, analyzes, and renders deliverables to `output/`.
 * **100-Anchor FFT Cross-Correlation:** Uses dynamic multi-anchor 8kHz PCM FFT cross-correlation in memory to find sub-millisecond delay offsets in seconds.
-* **Candidate Clustering & Runner-Ups:** Groups measurements within a $\pm 30\text{ms}$ sub-frame tolerance to calculate a robust consensus winner and displays up to 2 distinct runner-up offsets with confidence ratings.
-* **Percentage & Raw Confidence:** Reports match confidence both as a clear percentage and normalized peak score (e.g. `88.9% (0.8887)`).
-* **Automatic Working Directory Routing:** Places temporary analysis WAVs in `<movie_dir>/scratch/` (with atomic write protections) and renders final encodes to `<movie_dir>/output/`.
+* **DescribeAlign DTW Integration:** Automatically triggers or forces (`--force-dtw`) Dynamic Time Warping piecewise alignment for alternate cuts with 3-layer smoothing (VAD + Zero-Crossing + 50ms Crossfade) and bit-perfect PCM passthrough.
+* **Stream Selection (`--ref-stream`):** Choose specific audio tracks from multi-track MKVs (e.g. `--ref-stream 0:a:1`).
+* **Dynamic Sample-Rate PAL Handling (`--pal` / `--no-pal`):** Computes exact `asetrate` sample clock manipulation based on probed input sample rates (44.1k vs 48k). Use `--no-pal` to enforce native 1.0x speed on shorter Theatrical Cuts.
 * **Standard Multi-Track Encoding:**
   * **AD Tracks:** Outputs both `-AD (Stereo).m4a` (with `alimiter` clipping protection) and `-AD (Night Mode).m4a` (EBU R128 `loudnorm` -16 LUFS).
-  * **Main Audio (`--convert-main`):** Converts 5.1/7.1 sources to `(Surround).ac3` (5.1 384k), `(Stereo).m4a` (downmix + `alimiter`), and `(Night Mode).m4a` (downmix + `loudnorm`).
-* **Smart Pitch & Speed Corrections:** Automatically detects and reverses PAL (4% speedup) or NTSC pulldown tempo shifts.
+  * **Main Audio (`--convert-main`):** Converts 5.1/7.1 sources to `(Surround).ac3` (5.1 640k), `(Stereo).m4a` (true 2.0 downmix via ITU-R BS.775 matrix + `alimiter`), and `(Night Mode).m4a` (true 2.0 downmix + `loudnorm`).
 * **Test Previews:** Multiplexes short MKV samples with video so you can visually verify lip-sync before rendering the full movie.
 
 **Example Usage:**
 ```powershell
-# Full movie sync & main audio conversion in 1 command:
-python scripts/sync_ad_track.py -r "F:\uploads\Movie\source\Movie.dts" -a "F:\uploads\Movie\tosync\Movie_AD.mp3" --convert-main
+# 1. Directory Auto-Discovery (AD sync + Main 5.1 & True 2.0 AAC conversion):
+python scripts/sync_ad_track.py "F:\uploads\queue\Gremlins" --convert-main
 
-# Fast 3-minute video lip-sync test:
-python scripts/sync_ad_track.py -r "Movie.eac3" -a "AD.mp3" -m "Movie.mkv" --preview 180
+# 2. Specific audio stream with forced DTW alignment (e.g. Theatrical vs Extended Cut):
+python scripts/sync_ad_track.py "F:\uploads\queue\EnterTheDragon" --ref-stream 0:a:1 --force-dtw --no-pal
+
+# 3. Fast 3-minute video lip-sync test:
+python scripts/sync_ad_track.py "F:\uploads\queue\Gremlins" --preview 180
 ```
 
 ### 2. Standalone 2-Pass Converter (`convert_ad_2pass.py`)
@@ -43,24 +46,39 @@ For Blu-rays with multiple cuts (e.g., Theatrical vs Extended), these scripts re
 * Automatically crossfades in the standard 5.1/7.1 audio for inserted scenes where no AD exists.
 
 ### 4. DTW Smooth Stitcher (`dtw_smooth_stitch.py`)
-When `describealign` Dynamic Time Warping is used for complex alignment (episodes with commercial edits, scene insertions), the resulting audio splices can sound harsh — cutting mid-word or creating audible clicks at segment transitions.
-
-The smooth stitcher solves this with a **3-layer transition pipeline** applied to describealign's alignment data:
+When `describealign` Dynamic Time Warping is used for complex alignment (episodes with commercial edits, scene insertions, or rate-stretched cuts), the smooth stitcher applies a **3-layer transition pipeline** to describealign's alignment data:
 
 1. **VAD-Aware Cut Nudging** — Detects active speech at each cut boundary using RMS energy analysis. If a cut falls mid-word, it's automatically nudged to the nearest silence gap (±500ms search window, 200ms hangover).
 2. **Zero-Crossing Snapping** — Each cut is micro-adjusted (±2ms) to land on a waveform zero crossing, eliminating DC-offset pops.
-3. **Equal-Power Crossfade** — 50ms cosine-shaped crossfades at every transition ensure smooth blending without volume dips.
+3. **Equal-Power Crossfade & Sinc Rate Resampling** — Preserves 100% bit-perfect native PCM samples without interpolation for standard-speed audio, applies bandlimited sinc resampling (`scipy.signal.resample`) for genuine rate-stretch segments (e.g. PAL $\to$ Film), and blends segment junctions using 50ms cosine-shaped constant-power crossfades ($\cos^2 + \sin^2 = 1$).
 
-**Example Usage:**
-```powershell
-# Standalone (from describealign alignment plot):
-python scripts/dtw_smooth_stitch.py alignment.txt AD_track.mka output.m4a
+### 5. Piecewise Reel-Aware Synchronization (35mm Film Scans)
+For archival 35mm film scans where physical reel changes (every ~20 minutes) have missing or damaged frames:
+* Identifies discrete offset clusters across the film using sub-millisecond FFT cross-correlation.
+* Preserves **100% native speed (1.000000x) and pitch** across every individual reel without artificial time-stretching.
+* Finds natural silence gaps at scene transitions near reel changes and applies equal-power cosine crossfades.
 
-# Automatic (via batch orchestrator — no extra steps needed):
-python scripts/batch_orchestrator.py
-```
+---
 
-### 5. Full Scripts Index
+## Alignment Strategy: Anchor Correlation vs. DescribeAlign DTW
+
+Both alignment methods serve complementary purposes depending on release characteristics:
+
+| Feature / Metric | 100-Anchor Cross-Correlation (Default) | DescribeAlign Dynamic Time Warping (DTW) |
+| :--- | :--- | :--- |
+| **Best Used For** | Identical cuts (same edit, different audio delay/master). | Alternate cuts (Theatrical vs Extended, TV trims, commercials). |
+| **Audio Integrity** | **100% Bit-Perfect Linear Passthrough:** Shifts the track as one continuous stream. Zero splicing, zero pitch/tempo warps. | **Piecewise Reconstruction:** Slices into segments, stretches/compresses intervals, and crossfades boundaries. |
+| **Precision** | Sub-millisecond sample accuracy ($\pm 1\text{ms}$). | Quantized time step windows (~100ms resolution). |
+| **Execution Time** | **~2–4 seconds** via in-memory 8kHz FFT arrays. | **1–3 minutes** per track (feature extraction + LP optimization). |
+| **Diagnostic Role** | Consensus score immediately validates whether cuts match ($\ge 50\%$) or differ ($< 10\%$). | Engages automatically when anchor score confirms cut mismatch. |
+
+### When to Use Which:
+* **Use Anchor Method (Default):** Always try first for standard releases. It provides instantaneous sync without altering the acoustic timbre, pitch, or dynamics of the narrator's track.
+* **Use DescribeAlign (`--force-dtw`):** Use when syncing an AD track from an alternate edition (e.g. aligning a Theatrical Cut AD track onto an Extended Cut Blu-ray). DescribeAlign navigates scene insertions and trims, while `dtw_smooth_stitch.py` ensures transparent transitions.
+
+---
+
+### 6. Full Scripts Index
 Please refer to `scripts/README.md` for a comprehensive, up-to-date index of all core pipeline, prototyping, and legacy scripts included in this repository.
 
 ## Setup & Portability

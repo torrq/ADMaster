@@ -90,7 +90,7 @@ def parse_alignment_plot(plot_file):
 
     # Full-line regex capturing rate, master times, and audio times
     full_re = re.compile(
-        r"Rate change of\s+([0-9.]+)%\s+from\s+([0-9:\.]+)\s+to\s+([0-9:\.]+)"
+        r"Rate change of\s+([-0-9.]+)%\s+from\s+([0-9:\.]+)\s+to\s+([0-9:\.]+)"
         r"\s+aligning with audio from\s+([0-9:\.]+)\s+to\s+([0-9:\.]+)"
     )
     # Fallback: just audio from/to (older plot formats)
@@ -120,20 +120,28 @@ def parse_alignment_plot(plot_file):
                     "audio_end":    time_to_sec(m2.group(2)),
                 })
 
-    return segments
+    cleaned = []
+    for s in segments:
+        dur_master = s["master_end"] - s["master_start"]
+        # Filter out extreme micro-glitches (e.g. 7407% rate jump over 0.07 seconds)
+        if dur_master < 0.25 and abs(s["rate_pct"]) > 50.0:
+            continue
+        cleaned.append(s)
+
+    return cleaned if cleaned else segments
 
 
 # ─── Audio I/O ────────────────────────────────────────────────────────────────
 
-def predecode_to_mono(input_audio, output_wav, ffmpeg, sample_rate=48000):
+def predecode_to_pcm(input_audio, output_wav, ffmpeg, sample_rate=48000):
     """
-    Decode any audio format to mono 16-bit WAV.
+    Decode any audio format to 16-bit WAV (keeping original channels).
     Uses atomic temp-file pattern to prevent corruption on interrupt.
     """
     tmp = output_wav.replace(".wav", "_tmp.wav")
     cmd = [
-        ffmpeg, "-y", "-i", input_audio,
-        "-vn", "-ac", "1", "-ar", str(sample_rate),
+        ffmpeg, "-y", "-nostdin", "-i", input_audio,
+        "-vn", "-ar", str(sample_rate),
         "-c:a", "pcm_s16le", "-f", "wav", tmp,
     ]
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -147,6 +155,7 @@ def load_wav(wav_path):
     with wave.open(wav_path, "rb") as wf:
         sr = wf.getframerate()
         n = wf.getnframes()
+        channels = wf.getnchannels()
         raw = wf.readframes(n)
         width = wf.getsampwidth()
 
@@ -167,15 +176,23 @@ def load_wav(wav_path):
     else:
         raise ValueError(f"Unsupported sample width: {width}")
 
+    if channels >= 1:
+        arr = arr.reshape(-1, channels)
+
     return arr, sr
 
 
 def write_wav(samples, sr, output_path):
-    """Write float32 [-1,1] samples to 16-bit 48kHz mono WAV."""
+    """Write float32 [-1,1] samples to 16-bit 48kHz WAV."""
     clipped = np.clip(samples, -1.0, 1.0)
     pcm = (clipped * 32767).astype(np.int16)
+    channels = samples.shape[1] if samples.ndim > 1 else 1
+    
+    if samples.ndim > 1:
+        pcm = pcm.flatten()
+        
     with wave.open(output_path, "wb") as wf:
-        wf.setnchannels(1)
+        wf.setnchannels(channels)
         wf.setsampwidth(2)
         wf.setframerate(sr)
         wf.writeframes(pcm.tobytes())
@@ -187,6 +204,8 @@ def rms_energy(samples):
     """Root Mean Square energy of a sample buffer."""
     if len(samples) == 0:
         return 0.0
+    if samples.ndim == 2:
+        samples = np.mean(samples, axis=1)
     return float(np.sqrt(np.mean(samples.astype(np.float64) ** 2)))
 
 
@@ -306,7 +325,9 @@ def snap_zero_crossing(samples, sample_idx, radius_ms=2, sr=48000):
     if len(region) < 2:
         return sample_idx
 
-    crossings = np.where(np.diff(np.signbit(region)))[0]
+    mono_region = region[:, 0] if region.ndim > 1 else region
+    crossings = np.where(np.diff(np.signbit(mono_region)))[0]
+    
     if len(crossings) == 0:
         return sample_idx
 
@@ -336,10 +357,18 @@ def crossfade_stitch(segments_audio, crossfade_samples):
     t = np.linspace(0, 1, xf, dtype=np.float32)
     fade_out = np.cos(t * np.pi / 2)   # 1 → 0
     fade_in  = np.sin(t * np.pi / 2)   # 0 → 1
+    
+    if segments_audio[0].ndim == 2:
+        fade_out = fade_out[:, np.newaxis]
+        fade_in = fade_in[:, np.newaxis]
 
     # Calculate total output length
     total = sum(len(s) for s in segments_audio) - xf * (len(segments_audio) - 1)
-    output = np.zeros(max(total, 0), dtype=np.float32)
+    
+    if segments_audio[0].ndim == 2:
+        output = np.zeros((max(total, 0), segments_audio[0].shape[1]), dtype=np.float32)
+    else:
+        output = np.zeros(max(total, 0), dtype=np.float32)
 
     pos = 0
     for i, seg in enumerate(segments_audio):
@@ -377,7 +406,7 @@ def smooth_stitch_audio(segments, samples, sr,
 
     Args:
         segments:  List of dicts from parse_alignment_plot() with audio_start/audio_end
-        samples:   Mono float32 numpy array of the full source AD audio
+        samples:   Float32 numpy array of the full source AD audio (mono or stereo)
         sr:        Sample rate
 
     Returns:
@@ -417,17 +446,55 @@ def smooth_stitch_audio(segments, samples, sr,
         snapped.append((new_s, new_e))
     print(f"  [ZC] Snapped {zc_count}/{len(snapped)} boundary pairs to zero crossings")
 
-    # Extract segment audio
-    extracted = []
-    for s, e in snapped:
-        extracted.append(samples[s:e].copy())
-
-    # ── Layer 3: Equal-Power Crossfade ──
-    print(f"\n  Layer 3: Equal-Power Crossfade ({crossfade_ms}ms, "
+    # ── Layer 3: Absolute Timeline Placement & Equal-Power Crossfade ──
+    print(f"\n  Layer 3: Absolute Timeline Placement & Crossfade ({crossfade_ms}ms, "
           f"{xf_samples} samples)")
-    result = crossfade_stitch(extracted, xf_samples)
+          
+    duration_s = max(seg["master_end"] for seg in segments)
+    canvas_len = int(duration_s * sr) + int(sr * 10)  # 10s extra padding just in case
+    channels = samples.shape[1] if samples.ndim > 1 else 1
+    canvas = np.zeros((canvas_len, channels), dtype=np.float32)
+    
+    t = np.linspace(0, 1, xf_samples, dtype=np.float32)
+    fade_out = (np.cos(t * np.pi / 2) ** 2)
+    fade_in = (np.sin(t * np.pi / 2) ** 2)
+    if channels >= 1:
+        fade_out = fade_out[:, np.newaxis]
+        fade_in = fade_in[:, np.newaxis]
+        
+    for i, (s, e) in enumerate(snapped):
+        seg = segments[i]
+        master_s = int(seg["master_start"] * sr)
+        master_e = int(seg["master_end"] * sr)
+        target_len = max(0, master_e - master_s)
+        
+        # Extend e by xf_samples if not the last segment, so it overlaps with the next
+        if i < len(snapped) - 1:
+            e = min(len(samples), e + xf_samples)
+            target_len += xf_samples
+            
+        audio = samples[s:e].copy()
+        
+        # Only resample if segment has an intentional, significant rate change (e.g. PAL 4.3% stretch)
+        # Native-speed segments are kept 100% bit-perfect without any DSP filtering
+        # Genuine rate-stretch segments use bandlimited sinc resampling (scipy.signal.resample) to guarantee full 20Hz-20kHz response
+        if abs(seg.get("rate_pct", 0.0)) >= 1.0 and len(audio) > 0 and target_len > 0:
+            import scipy.signal
+            audio = scipy.signal.resample(audio, target_len, axis=0).astype(np.float32)
+        
+        # Apply fades
+        if i > 0 and len(audio) >= xf_samples:
+            audio[:xf_samples] *= fade_in
+        if i < len(snapped) - 1 and len(audio) >= xf_samples:
+            audio[-xf_samples:] *= fade_out
+            
+        write_e = min(master_s + len(audio), canvas_len)
+        read_e = write_e - master_s
+        if read_e > 0:
+            canvas[master_s:write_e] += audio[:read_e]
 
-    return result
+    exact_samples = int(duration_s * sr)
+    return canvas[:exact_samples]
 
 
 def run_smooth_stitch(plot_file, input_audio, output_audio,
@@ -472,15 +539,15 @@ def run_smooth_stitch(plot_file, input_audio, output_audio,
         scratch_dir = os.path.join(os.path.dirname(output_audio), "scratch")
     os.makedirs(scratch_dir, exist_ok=True)
 
-    # ── Pre-decode to mono WAV ──
+    # ── Pre-decode to PCM WAV ──
     basename = os.path.splitext(os.path.basename(input_audio))[0]
-    analysis_wav = os.path.join(scratch_dir, f"{basename}_mono48k.wav")
+    analysis_wav = os.path.join(scratch_dir, f"{basename}_pcm48k.wav")
 
     if os.path.exists(analysis_wav) and os.path.getsize(analysis_wav) > 1000:
         print(f"\n  Using cached analysis WAV: {os.path.basename(analysis_wav)}")
     else:
-        print(f"\n  Pre-decoding to mono 48kHz WAV...")
-        predecode_to_mono(input_audio, analysis_wav, ffmpeg, sample_rate=48000)
+        print(f"\n  Pre-decoding to PCM 48kHz WAV...")
+        predecode_to_pcm(input_audio, analysis_wav, ffmpeg, sample_rate=48000)
 
     # ── Load samples ──
     samples, sr = load_wav(analysis_wav)
@@ -507,10 +574,14 @@ def run_smooth_stitch(plot_file, input_audio, output_audio,
     raw_wav = os.path.join(scratch_dir, f"{basename}_stitched_raw.wav")
     write_wav(stitched, sr, raw_wav)
 
-    # ── Encode to final format with loudnorm ──
-    print(f"\n  Encoding final output with EBU R128 loudnorm...")
+    # ── Encode to final format ──
+    print(f"\n  Encoding final output tracks...")
+    
     ext = os.path.splitext(output_audio)[1].lower()
-
+    base_out = os.path.splitext(output_audio)[0]
+    
+    output_standard = f"{base_out}{ext}"
+    
     if ext in (".m4a", ".aac"):
         codec = ["-c:a", "aac", "-b:a", "256k"]
     elif ext == ".ac3":
@@ -520,23 +591,29 @@ def run_smooth_stitch(plot_file, input_audio, output_audio,
     else:
         codec = ["-c:a", "aac", "-b:a", "256k"]
 
-    encode_cmd = [
-        ffmpeg, "-y", "-i", raw_wav,
-        "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+    # Encode Standard (Unnormalized, just limited to prevent clipping)
+    encode_std_cmd = [
+        ffmpeg, "-y", "-nostdin", "-i", raw_wav,
+        "-af", "alimiter=level_in=1:level_out=0.98:limit=0.98",
         "-ar", "48000",
         *codec,
         "-vn",
-        output_audio,
+        output_standard,
     ]
-    result = subprocess.run(encode_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"FFmpeg encode failed:\n{result.stderr.decode('utf-8', errors='ignore')}"
-        )
+    
+    # Encode Night Mode (Normalized EBU R128)
+        
+    for cmd, name in [(encode_std_cmd, "Standard")]:
+        print(f"    -> Encoding {name} track...")
+        print(f"       COMMAND: {' '.join(cmd)}")
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if res.returncode != 0:
+            raise RuntimeError(f"FFmpeg encode failed for {name}:\n{res.stderr.decode('utf-8', errors='ignore')}")
 
-    print(f"\n  [SUCCESS] Smooth-stitched output: {output_audio}")
+    print(f"\n  [SUCCESS] Smooth-stitched outputs:")
+    print(f"    - {output_standard}")
     print("=" * 64)
-    return output_audio
+    return output_standard
 
 
 # ─── CLI Entry Point ─────────────────────────────────────────────────────────

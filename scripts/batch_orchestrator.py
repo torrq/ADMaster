@@ -44,16 +44,19 @@ def get_audio_offsets(mkv_file, mka_file):
     offsets = []
     for line in proc.stdout:
         line = line.strip()
-        m = re.search(r"Anchor\s+\d+s:\s*Measured Offset = ([+-]?\d+\.\d+)s", line)
+        m = re.search(r"SELECTED CONSENSUS OFFSET.*:\s*([+-]?\d+\.\d+)s", line)
         if m:
             offsets.append(float(m.group(1)))
+        m2 = re.search(r"Runner-up #\d+.*:\s*([+-]?\d+\.\d+)s", line)
+        if m2:
+            offsets.append(float(m2.group(1)))
             
     if not offsets:
         return []
         
     clustered = [offsets[0]]
     for off in offsets[1:]:
-        if abs(off - clustered[-1]) > 1.0:
+        if abs(off - clustered[-1]) > 0.05:
             clustered.append(off)
             
     return clustered
@@ -129,6 +132,7 @@ def do_direct_mux(ep_num, mkv_file, ad_file, offset, dry_run=False):
         "-metadata:s:a:1", "language=eng", "-metadata:s:a:1", "title=AD, Stereo", "-disposition:a:1", "visual_impaired",
         out_file
     ]
+    print(f"COMMAND: {' '.join(cmd)}")
     subprocess.run(cmd)
 
 def do_frame_perfect(ep_num, mkv_file, ad_file, regions, gaps, first_offset, dry_run=False):
@@ -152,12 +156,13 @@ def do_frame_perfect(ep_num, mkv_file, ad_file, regions, gaps, first_offset, dry
         "-map", "[a_out_master]",
         "-map", "[a_out_ad]",
         "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-        "-c:a:0", "ac3", "-b:a:0", "384k",
+        "-c:a:0", "ac3", "-b:a:0", "640k",
         "-c:a:1", "aac", "-b:a:1", "256k", "-ar:a:1", "48000",
         "-metadata:s:a:0", "language=eng", "-metadata:s:a:0", "title=Main, Stereo", "-disposition:a:0", "default",
         "-metadata:s:a:1", "language=eng", "-metadata:s:a:1", "title=AD, Stereo", "-disposition:a:1", "visual_impaired",
         out_file
     ]
+    print(f"COMMAND: {' '.join(cmd)}")
     subprocess.run(cmd)
 
 def do_dtw(ep_num, mkv_file, ad_file, dry_run=False):
@@ -175,6 +180,7 @@ def do_dtw(ep_num, mkv_file, ad_file, dry_run=False):
     cmd = ["python", describealign_script, "--yes", "--stretch_audio", mkv_file, ad_file]
     
     print(f"[{ep_num}] Running describealign DTW processor (this will take a while)...")
+    print(f"COMMAND: {' '.join(cmd)}")
     subprocess.run(cmd, cwd=OUT_DIR)
     
     # describealign outputs both:
@@ -184,8 +190,10 @@ def do_dtw(ep_num, mkv_file, ad_file, dry_run=False):
     # Look for alignment plot to use our smooth stitcher (preferred path)
     import glob
     import shutil
-    plot_files = sorted(glob.glob(os.path.join(OUT_DIR, "alignment_plots", "*.txt")))
-    aligned_files = glob.glob(os.path.join(OUT_DIR, "videos_with_ad", f"*{os.path.basename(mkv_file)}"))
+    basename = os.path.basename(mkv_file)
+    plot_name = os.path.splitext(basename)[0]
+    plot_files = sorted(glob.glob(os.path.join(OUT_DIR, "alignment_plots", f"*{plot_name}*.txt")))
+    aligned_files = glob.glob(os.path.join(OUT_DIR, "videos_with_ad", f"*{basename}"))
     
     if plot_files:
         # ── Smooth Stitch Path (3-layer transitions) ──
@@ -199,29 +207,34 @@ def do_dtw(ep_num, mkv_file, ad_file, dry_run=False):
         smooth_ad_m4a = os.path.join(scratch_dir, f"ep{ep_num}_smooth_ad.m4a")
         
         try:
-            run_smooth_stitch(
+            std_ad, nm_ad = run_smooth_stitch(
                 plot_files[-1],    # Most recent alignment plot
                 ad_file,           # Original AD audio source
-                smooth_ad_m4a,     # Smooth-stitched output
+                smooth_ad_m4a,     # Smooth-stitched output base
                 scratch_dir=scratch_dir,
             )
             
-            # Mux: original video + original main audio + our smooth AD audio
+            # Mux: original video + original main audio + our smooth AD audio (std + nm)
             temp_file = out_file + ".temp.mkv"
             mux_cmd = [
                 FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
                 "-i", mkv_file,         # Video + Main audio
-                "-i", smooth_ad_m4a,    # Smooth-stitched AD
+                "-i", std_ad,           # Smooth-stitched AD (Standard)
+                "-i", nm_ad,            # Smooth-stitched AD (Night Mode)
                 "-map", "0:v:0",
                 "-map", "0:a:0",        # Main audio
-                "-map", "1:a:0",        # Smooth AD audio
+                "-map", "1:a:0",        # Smooth AD audio (Standard)
+                "-map", "2:a:0",        # Smooth AD audio (Night Mode)
                 "-c", "copy",
-                "-metadata:s:a:0", "title=Main, Stereo", "-metadata:s:a:0", "language=eng",
                 "-disposition:a:0", "default",
-                "-metadata:s:a:1", "title=AD, Stereo", "-metadata:s:a:1", "language=eng",
-                "-disposition:a:1", "visual_impaired",
-                temp_file,
+                "-disposition:a:1", "0",
+                "-disposition:a:2", "0",
+                "-metadata:s:a:0", "language=eng", "-metadata:s:a:0", "title=Main, Stereo",
+                "-metadata:s:a:1", "language=eng", "-metadata:s:a:1", "title=AD, Stereo",
+                "-metadata:s:a:2", "language=eng", "-metadata:s:a:2", "title=AD, Night Mode",
+                temp_file
             ]
+            print(f"COMMAND: {' '.join(mux_cmd)}")
             subprocess.run(mux_cmd, check=True)
             os.replace(temp_file, out_file)
             
