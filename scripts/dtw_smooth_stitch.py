@@ -199,6 +199,63 @@ def write_wav(samples, sr, output_path):
         wf.writeframes(pcm.tobytes())
 
 
+def wsola_time_stretch(audio_samples, sr, target_samples, ffmpeg_bin=None):
+    """
+    Pitch-corrected time-stretching using WSOLA (FFmpeg atempo filter).
+    Preserves natural voice pitch and timbre while stretching or shrinking duration.
+    """
+    if len(audio_samples) == 0 or target_samples <= 0 or len(audio_samples) == target_samples:
+        return audio_samples
+    
+    tempo = float(len(audio_samples)) / float(target_samples)
+    if abs(tempo - 1.0) < 0.002:
+        return audio_samples
+        
+    if ffmpeg_bin is None:
+        ffmpeg_bin = find_ffmpeg()
+        
+    # Build atempo filter chain (atempo accepts values in [0.5, 2.0])
+    filters = []
+    curr = tempo
+    while curr < 0.5:
+        filters.append("atempo=0.5")
+        curr /= 0.5
+    while curr > 2.0:
+        filters.append("atempo=2.0")
+        curr /= 2.0
+    filters.append(f"atempo={curr:.6f}")
+    filter_str = ",".join(filters)
+    
+    raw_in = (np.clip(audio_samples, -1.0, 1.0) * 32767).astype(np.int16)
+    channels = audio_samples.shape[1] if audio_samples.ndim > 1 else 1
+    
+    cmd = [
+        ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+        "-f", "s16le", "-ar", str(sr), "-ac", str(channels), "-i", "pipe:0",
+        "-af", filter_str,
+        "-f", "s16le", "-ar", str(sr), "-ac", str(channels), "pipe:1"
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out_bytes, _ = proc.communicate(input=raw_in.tobytes())
+    
+    if len(out_bytes) == 0:
+        return audio_samples
+        
+    out_arr = np.frombuffer(out_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+    if channels > 1:
+        out_arr = out_arr.reshape(-1, channels)
+        
+    # Align to target samples
+    if len(out_arr) > target_samples:
+        out_arr = out_arr[:target_samples]
+    elif len(out_arr) < target_samples:
+        diff = target_samples - len(out_arr)
+        pad = np.zeros((diff, channels) if channels > 1 else (diff,), dtype=np.float32)
+        out_arr = np.vstack([out_arr, pad]) if channels > 1 else np.concatenate([out_arr, pad])
+        
+    return out_arr
+
+
 # --- Layer 1: VAD-Aware Cut Nudging ------------------------------------------
 
 def rms_energy(samples):
@@ -413,6 +470,32 @@ def smooth_stitch_audio(segments, samples, sr,
     Returns:
         Stitched float32 numpy array.
     """
+    # -------------------------------------------------------------------------
+    # Layer 0: DescribeAlign Wobble Filtering
+    # -------------------------------------------------------------------------
+    print("\n  Layer 0: Filtering DTW Hallucinations (Wobble Correction)...", flush=True)
+    filtered_segments = []
+    current_offset = segments[0]["master_start"] - segments[0]["audio_start"]
+    
+    for i, seg in enumerate(segments):
+        audio_dur = seg["audio_end"] - seg["audio_start"]
+        master_dur = seg["master_end"] - seg["master_start"]
+        target_offset = seg["master_end"] - seg["audio_end"]
+        
+        if abs(target_offset - current_offset) > 0.05:
+            if audio_dur > 2.0 and master_dur > 2.0:
+                print(f"  [WOBBLE DETECTED] Seg {i+1}: Ignoring offset shift to {target_offset:+.3f}s, maintaining {current_offset:+.3f}s", flush=True)
+            else:
+                current_offset = target_offset
+                
+        # Force the segment to conform to the current true offset
+        seg["audio_start"] = seg["master_start"] - current_offset
+        seg["audio_end"] = seg["master_end"] - current_offset
+        seg["rate_pct"] = 0.0
+        filtered_segments.append(seg)
+        
+    segments = filtered_segments
+
     xf_samples = int(sr * crossfade_ms / 1000.0)
 
     # Convert time boundaries -> sample indices
@@ -459,38 +542,34 @@ def smooth_stitch_audio(segments, samples, sr,
     t = np.linspace(0, 1, xf_samples, dtype=np.float32)
     fade_out = (np.cos(t * np.pi / 2) ** 2)
     fade_in = (np.sin(t * np.pi / 2) ** 2)
-    if channels >= 1:
-        fade_out = fade_out[:, np.newaxis]
-        fade_in = fade_in[:, np.newaxis]
         
     for i, (s, e) in enumerate(snapped):
         seg = segments[i]
         master_s = int(seg["master_start"] * sr)
-        master_e = int(seg["master_end"] * sr)
-        target_len = max(0, master_e - master_s)
         
         # Extend e by xf_samples if not the last segment, so it overlaps with the next
         if i < len(snapped) - 1:
             e = min(len(samples), e + xf_samples)
-            target_len += xf_samples
             
         audio = samples[s:e].copy()
+            
+        if canvas.ndim > 1 and audio.ndim == 1:
+            audio = audio[:, np.newaxis]
+        elif canvas.ndim == 1 and audio.ndim > 1:
+            audio = audio.squeeze()
+            
+        f_in = fade_in[:, np.newaxis] if audio.ndim == 2 else fade_in.ravel()
+        f_out = fade_out[:, np.newaxis] if audio.ndim == 2 else fade_out.ravel()
         
-        # Only resample if segment has an intentional, significant rate change (e.g. PAL 4.3% stretch)
-        # Native-speed segments are kept 100% bit-perfect without any DSP filtering
-        # Genuine rate-stretch segments use bandlimited sinc resampling (scipy.signal.resample) to guarantee full 20Hz-20kHz response
-        if abs(seg.get("rate_pct", 0.0)) >= 1.0 and len(audio) > 0 and target_len > 0:
-            import scipy.signal
-            audio = scipy.signal.resample(audio, target_len, axis=0).astype(np.float32)
-        
-        # Apply fades
+        # Apply equal-power crossfades
         if i > 0 and len(audio) >= xf_samples:
-            audio[:xf_samples] *= fade_in
+            audio[:xf_samples] = audio[:xf_samples] * f_in
         if i < len(snapped) - 1 and len(audio) >= xf_samples:
-            audio[-xf_samples:] *= fade_out
+            audio[-xf_samples:] = audio[-xf_samples:] * f_out
             
         write_e = min(master_s + len(audio), canvas_len)
         read_e = write_e - master_s
+        print(f"[DEBUG] Seg {i}: master_s={master_s}, write_e={write_e}, audio_len={len(audio)}, read_e={read_e}", flush=True)
         if read_e > 0:
             canvas[master_s:write_e] += audio[:read_e]
 

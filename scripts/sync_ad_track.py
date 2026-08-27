@@ -406,7 +406,7 @@ def compute_sync_parameters(ffmpeg_bin, ffprobe_bin, base_path, ad_tracks, targe
     return sync_results
 
 
-def render_main_tracks(ffmpeg_bin, ref_path, base_title, out_dir, scratch_dir, channels, stream_map=None, preview_sec=None, threads=2, keep_scratch=False, overwrite=False):
+def render_main_tracks(ffmpeg_bin, ref_path, base_title, out_dir, scratch_dir, channels, stream_map=None, preview_sec=None, threads=2, keep_scratch=False, overwrite=False, no_night=False):
     """Renders standard converted formats for Main Audio (Surround AC3, Stereo AAC 2.0, Night Mode AAC 2.0).
     Enforces strict ITU-R BS.775 2.0 downmixing and -ac 2."""
     print("\n=== RENDERING MAIN AUDIO TRACKS ===", flush=True)
@@ -439,12 +439,13 @@ def render_main_tracks(ffmpeg_bin, ref_path, base_title, out_dir, scratch_dir, c
     out_night = os.path.join(out_dir, f"{base_title} (Night Mode){suffix}.m4a")
 
     stereo_exists = os.path.exists(out_stereo) and os.path.getsize(out_stereo) > 1000
-    night_exists = os.path.exists(out_night) and os.path.getsize(out_night) > 1000
+    night_exists = True if no_night else (os.path.exists(out_night) and os.path.getsize(out_night) > 1000)
 
     if stereo_exists and night_exists and not overwrite:
         print(f"  [SKIP] Main Stereo & Night Mode AAC already exist in output/ (use --overwrite to force re-render):", flush=True)
         print(f"    [OK] {os.path.basename(out_stereo)} ({os.path.getsize(out_stereo)/(1024*1024):.1f} MB)", flush=True)
-        print(f"    [OK] {os.path.basename(out_night)} ({os.path.getsize(out_night)/(1024*1024):.1f} MB)", flush=True)
+        if not no_night:
+            print(f"    [OK] {os.path.basename(out_night)} ({os.path.getsize(out_night)/(1024*1024):.1f} MB)", flush=True)
         return
 
     # 2. Extract intermediate stereo WAV in scratch (BS.775 downmix)
@@ -484,7 +485,9 @@ def render_main_tracks(ffmpeg_bin, ref_path, base_title, out_dir, scratch_dir, c
             print(f"  Error rendering stereo: {res_stereo.stderr}", flush=True)
 
     # 4. Night Mode AAC 2.0 from stereo WAV
-    if night_exists and not overwrite:
+    if no_night:
+        pass
+    elif night_exists and not overwrite:
         print(f"  [SKIP] Main Night Mode AAC already exists: {os.path.basename(out_night)}", flush=True)
     else:
         print(f"  Encoding Main Night Mode AAC 2.0 (loudnorm -16 LUFS)...", flush=True)
@@ -530,7 +533,7 @@ def mux_video_sample(ffmpeg_bin, video_src, audio_src, out_mkv, render_duration)
         print(f"  Warning: MKV Video Muxing failed: {res.stderr}", flush=True)
 
 
-def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, sync_params, target_duration, out_dir, scratch_dir, ref_stream_map=None, target_i=-16.0, target_tp=-1.5, preview_sec=None, video_mux_path=None, threads=2, keep_scratch=False, overwrite=False):
+def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, sync_params, target_duration, out_dir, scratch_dir, ref_stream_map=None, target_i=-16.0, target_tp=-1.5, preview_sec=None, video_mux_path=None, threads=2, keep_scratch=False, overwrite=False, no_night=False):
     """Renders synced AD tracks: Stereo AAC (alimiter) and Night Mode AAC (loudnorm).
     Supports single-offset intermediate WAV rendering and automatic DescribeAlign DTW + Smooth Stitching fallback."""
     print("\n=== RENDERING AUDIO DESCRIPTION TRACKS ===", flush=True)
@@ -553,13 +556,14 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
         out_mkv = os.path.join(out_dir, f"{base_title} (Sample Sync Preview {int(render_duration)}s).mkv") if video_mux_path else None
         
         stereo_exists = os.path.exists(out_stereo) and os.path.getsize(out_stereo) > 1000
-        night_exists = os.path.exists(out_night) and os.path.getsize(out_night) > 1000
+        night_exists = True if no_night else (os.path.exists(out_night) and os.path.getsize(out_night) > 1000)
         mkv_exists = (not video_mux_path) or (os.path.exists(out_mkv) and os.path.getsize(out_mkv) > 1000)
         
         if stereo_exists and night_exists and mkv_exists and not overwrite:
             print(f"\n  [SKIP] All AD deliverables for [{name}] already exist in output/ (use --overwrite to force re-render):", flush=True)
             print(f"    [OK] {os.path.basename(out_stereo)} ({os.path.getsize(out_stereo)/(1024*1024):.1f} MB)", flush=True)
-            print(f"    [OK] {os.path.basename(out_night)} ({os.path.getsize(out_night)/(1024*1024):.1f} MB)", flush=True)
+            if not no_night:
+                print(f"    [OK] {os.path.basename(out_night)} ({os.path.getsize(out_night)/(1024*1024):.1f} MB)", flush=True)
             if out_mkv and os.path.exists(out_mkv):
                 print(f"    [OK] {os.path.basename(out_mkv)} ({os.path.getsize(out_mkv)/(1024*1024):.1f} MB)", flush=True)
             continue
@@ -666,19 +670,20 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                         print(f"  Error rendering AD Stereo: {res_stereo.stderr}", flush=True)
 
                     # Encode Night Mode AAC from stitched WAV
-                    print(f"  Encoding Synced AD Night Mode AAC 2.0 (loudnorm {target_i} LUFS)...", flush=True)
-                    cmd_night = [
-                        ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "warning", "-threads", str(threads),
-                        "-i", raw_stitched_wav,
-                        "-af", f"loudnorm=I={target_i}:TP={target_tp}:LRA=11",
-                        "-ac", "2", "-ar", "48000",
-                        "-c:a", "aac", "-b:a", "256k", out_night
-                    ]
-                    res_night = subprocess.run(cmd_night, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                    if res_night.returncode == 0:
-                        print(f"  [SUCCESS] Saved: {out_night}", flush=True)
-                    else:
-                        print(f"  Error rendering AD Night Mode: {res_night.stderr}", flush=True)
+                    if not no_night:
+                        print(f"  Encoding Synced AD Night Mode AAC 2.0 (loudnorm {target_i} LUFS)...", flush=True)
+                        cmd_night = [
+                            ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "warning", "-threads", str(threads),
+                            "-i", raw_stitched_wav,
+                            "-af", f"loudnorm=I={target_i}:TP={target_tp}:LRA=11",
+                            "-ac", "2", "-ar", "48000",
+                            "-c:a", "aac", "-b:a", "256k", out_night
+                        ]
+                        res_night = subprocess.run(cmd_night, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                        if res_night.returncode == 0:
+                            print(f"  [SUCCESS] Saved: {out_night}", flush=True)
+                        else:
+                            print(f"  Error rendering AD Night Mode: {res_night.stderr}", flush=True)
                         
                     if not keep_scratch:
                         for sw in [ref_da_wav, ad_da_wav, raw_stitched_wav]:
@@ -744,19 +749,20 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
             print(f"  Error rendering AD Stereo: {res_stereo.stderr}", flush=True)
 
         # Night Mode AAC from clean WAV
-        print(f"  Encoding AD Night Mode AAC 2.0 (loudnorm {target_i} LUFS)...", flush=True)
-        cmd_night = [
-            ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "warning", "-threads", str(threads),
-            "-i", temp_wav,
-            "-af", f"loudnorm=I={target_i}:TP={target_tp}:LRA=11",
-            "-ac", "2", "-ar", "48000",
-            "-c:a", "aac", "-b:a", "256k", out_night
-        ]
-        res_night = subprocess.run(cmd_night, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if res_night.returncode == 0:
-            print(f"  [SUCCESS] Saved: {out_night}", flush=True)
-        else:
-            print(f"  Error rendering AD Night Mode: {res_night.stderr}", flush=True)
+        if not no_night:
+            print(f"  Encoding AD Night Mode AAC 2.0 (loudnorm {target_i} LUFS)...", flush=True)
+            cmd_night = [
+                ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "warning", "-threads", str(threads),
+                "-i", temp_wav,
+                "-af", f"loudnorm=I={target_i}:TP={target_tp}:LRA=11",
+                "-ac", "2", "-ar", "48000",
+                "-c:a", "aac", "-b:a", "256k", out_night
+            ]
+            res_night = subprocess.run(cmd_night, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if res_night.returncode == 0:
+                print(f"  [SUCCESS] Saved: {out_night}", flush=True)
+            else:
+                print(f"  Error rendering AD Night Mode: {res_night.stderr}", flush=True)
             
         # Cleanup intermediate WAV
         if not keep_scratch and os.path.exists(temp_wav):
@@ -894,12 +900,14 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
         if channels >= 6:
             expected_outputs.append(os.path.join(out_dir, f"{base_title} (Surround){suffix}.ac3"))
         expected_outputs.append(os.path.join(out_dir, f"{base_title} (Stereo){suffix}.m4a"))
-        expected_outputs.append(os.path.join(out_dir, f"{base_title} (Night Mode){suffix}.m4a"))
+        if not getattr(args, "no_night", False):
+            expected_outputs.append(os.path.join(out_dir, f"{base_title} (Night Mode){suffix}.m4a"))
 
     for name in ad_tracks.keys():
         label_prefix = f"{base_title}-AD" if len(ad_tracks) == 1 else f"{base_title}-AD [{name}]"
         expected_outputs.append(os.path.join(out_dir, f"{label_prefix} (Stereo){suffix}.m4a"))
-        expected_outputs.append(os.path.join(out_dir, f"{label_prefix} (Night Mode){suffix}.m4a"))
+        if not getattr(args, "no_night", False):
+            expected_outputs.append(os.path.join(out_dir, f"{label_prefix} (Night Mode){suffix}.m4a"))
         if args.mux_video:
             expected_outputs.append(os.path.join(out_dir, f"{base_title} (Sample Sync Preview {int(render_duration)}s).mkv"))
 
@@ -924,7 +932,7 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
         out_mkv = os.path.join(out_dir, f"{base_title} (Sample Sync Preview {int(render_duration)}s).mkv") if args.mux_video else None
         
         stereo_done = os.path.exists(out_stereo) and os.path.getsize(out_stereo) > 1000 and not args.overwrite
-        night_done = os.path.exists(out_night) and os.path.getsize(out_night) > 1000 and not args.overwrite
+        night_done = True if getattr(args, "no_night", False) else (os.path.exists(out_night) and os.path.getsize(out_night) > 1000 and not args.overwrite)
         mkv_done = (not args.mux_video) or (os.path.exists(out_mkv) and os.path.getsize(out_mkv) > 1000 and not args.overwrite)
         
         if not (stereo_done and night_done and mkv_done):
@@ -949,7 +957,7 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
             render_main_tracks(
                 ffmpeg_bin, ref_path, base_title, out_dir, scratch_dir, channels,
                 stream_map=ref_stream_map, preview_sec=args.preview, threads=args.threads,
-                keep_scratch=args.keep_scratch, overwrite=args.overwrite
+                keep_scratch=args.keep_scratch, overwrite=args.overwrite, no_night=getattr(args, "no_night", False)
             )
             
         if needed_ad_tracks:
@@ -957,7 +965,7 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
                 ffmpeg_bin, ffprobe_bin, ref_path, base_title, needed_ad_tracks, sync_params, target_duration,
                 out_dir, scratch_dir, ref_stream_map=ref_stream_map, target_i=args.target_i, target_tp=args.target_tp,
                 preview_sec=args.preview, video_mux_path=args.mux_video,
-                threads=args.threads, keep_scratch=args.keep_scratch, overwrite=args.overwrite
+                threads=args.threads, keep_scratch=args.keep_scratch, overwrite=args.overwrite, no_night=getattr(args, "no_night", False)
             )
         
     if not args.keep_scratch:
@@ -999,6 +1007,7 @@ EBU R128 loudness normalization, and MKV sample multiplexing.
     parser.add_argument("-p", "--preview", type=float, nargs="?", const=300.0, default=None, help="Fast sync test: Render short preview sample (Default: 300s)")
     parser.add_argument("-f", "--force-overwrite", "--overwrite", dest="overwrite", action="store_true", default=CONFIG.get("default_overwrite", False), help="Overwrite existing output deliverables in output/ (Default: False, skips existing files)")
     parser.add_argument("--convert-main", action="store_true", help="Also convert and downmix reference main audio (Surround AC3, True 2.0 Stereo AAC, Night Mode AAC)")
+    parser.add_argument("--no-night", action="store_true", help="Disable generating Night Mode (loudnorm) AAC variants")
     parser.add_argument("--no-render", action="store_true", help="Calculate sync parameters only, do not render output files")
     parser.add_argument("--anchors", type=int, default=CONFIG.get("default_anchors", 100), help="Number of correlation analysis anchors across timeline (Default: 100)")
     parser.add_argument("--no-stretch", action="store_true", help="Force native 1.0x speed rate without speed stretch")
