@@ -29,7 +29,7 @@ def run_loudnorm_2pass(ffmpeg_bin, input_path, base_filters,
     pass1_filters = f"asetpts=PTS-STARTPTS,{base_filters},loudnorm=I={target_i}:TP={target_tp}:LRA={target_lra}:print_format=json"
 
     cmd_pass1 = [
-        ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "warning", "-fflags", "+genpts", "-i", input_path,
+        ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-fflags", "+genpts", "-i", input_path,
         "-af", pass1_filters,
         "-f", "null", "-"
     ]
@@ -45,7 +45,7 @@ def run_loudnorm_2pass(ffmpeg_bin, input_path, base_filters,
     if not json_match:
         print("  WARNING: Pass 1 failed to output JSON. Falling back to 1-pass loudnorm.")
         cmd_fallback = [
-            ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "warning", "-fflags", "+genpts", "-i", input_path,
+            ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-fflags", "+genpts", "-i", input_path,
             "-af", f"asetpts=PTS-STARTPTS,{base_filters},loudnorm=I={target_i}:TP={target_tp}:LRA={target_lra}",
             "-c:a", "aac", "-b:a", "256k", "-ar", "48000", out_path
         ]
@@ -73,7 +73,7 @@ def run_loudnorm_2pass(ffmpeg_bin, input_path, base_filters,
     pass2_filters = f"asetpts=PTS-STARTPTS,{base_filters},{loudnorm_p2}"
 
     cmd_pass2 = [
-        ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "warning", "-fflags", "+genpts", "-i", input_path,
+        ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-fflags", "+genpts", "-i", input_path,
         "-af", pass2_filters,
         "-c:a", "aac", "-b:a", "256k", "-ar", "48000", out_path
     ]
