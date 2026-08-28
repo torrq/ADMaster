@@ -781,7 +781,7 @@ def mux_video_sample(ffmpeg_bin, video_src, audio_src,
 
 
 def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, sync_params, target_duration, out_dir, scratch_dir, ref_stream_map=None,
-                     target_i=-16.0, target_tp=-1.5, preview_sec=None, video_mux_path=None, threads=2, keep_scratch=False, overwrite=False, no_night=False):
+                     target_i=-16.0, target_tp=-1.5, preview_sec=None, video_mux_path=None, threads=2, keep_scratch=False, overwrite=False, no_night=False, debug=False):
     """Renders synced AD tracks: Stereo AAC (alimiter) and Night Mode AAC (loudnorm).
     Supports single-offset intermediate WAV rendering and automatic DescribeAlign DTW + Smooth Stitching fallback."""
     print("\n=== RENDERING AUDIO DESCRIPTION TRACKS ===", flush=True)
@@ -996,7 +996,7 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                     stitched = dtw_smooth_stitch.smooth_stitch_audio(
                         segments, samples, sr,
                         crossfade_ms=50, vad_search_ms=500, vad_threshold=0.02, silence_ms=200,
-                        debug=getattr(args, "debug", False)
+                        debug=debug
                     )
 
                     raw_stitched_wav = os.path.join(
@@ -1445,7 +1445,7 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
                 out_dir, scratch_dir, ref_stream_map=ref_stream_map, target_i=args.target_i, target_tp=args.target_tp,
                 preview_sec=args.preview, video_mux_path=args.mux_video,
                 threads=args.threads, keep_scratch=args.keep_scratch, overwrite=args.overwrite, no_night=getattr(
-                    args, "no_night", False)
+                    args, "no_night", False), debug=getattr(args, "debug", False)
             )
 
     if not args.keep_scratch:
