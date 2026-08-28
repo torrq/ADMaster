@@ -455,15 +455,18 @@ def smooth_stitch_audio(segments, samples, sr,
                     f"  [WOBBLE DETECTED] Seg {
                         i +
                         1}: Ignoring offset shift to {
-                        target_offset:+.3f}s, maintaining {
-                        current_offset:+.3f}s",
+                        target_offset:+.3f}s, maintaining 1.0x native playback",
                     flush=True)
+                # It's a hallucination (e.g. commercial break). Force 1.0x native playback.
+                seg["implied_rate"] = 1.0
+                
+                # Truncate the audio length to prevent it from overlapping into the next segment
+                # Since we are playing at 1.0x, it can only play for master_dur seconds.
+                if audio_dur > master_dur:
+                    seg["audio_end"] = seg["audio_start"] + master_dur
             else:
                 current_offset = target_offset
 
-        # Force the segment to conform to the current true offset
-        seg["audio_start"] = seg["master_start"] - current_offset
-        seg["audio_end"] = seg["master_end"] - current_offset
         seg["rate_pct"] = 0.0
         filtered_segments.append(seg)
 
@@ -522,7 +525,17 @@ def smooth_stitch_audio(segments, samples, sr,
 
     for i, (s, e) in enumerate(snapped):
         seg = segments[i]
-        master_s = int(seg["master_start"] * sr)
+        
+        implied_rate = seg.get("implied_rate", 1.0)
+        
+        # Audio was nudged by Layer 1 (VAD) and Layer 2 (Zero-Crossing).
+        # We MUST shift the master_s by the exact same duration to prevent sync drift and overlapping doubles!
+        audio_start_orig = int(seg["audio_start"] * sr)
+        audio_shift = s - audio_start_orig
+        
+        # Apply the implied rate to the shift
+        master_shift = int(audio_shift / implied_rate) if implied_rate > 0 else audio_shift
+        master_s = int(seg["master_start"] * sr) + master_shift
 
         # Extend e by xf_samples if not the last segment, so it overlaps with
         # the next
