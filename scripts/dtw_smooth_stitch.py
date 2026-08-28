@@ -141,7 +141,7 @@ def predecode_to_pcm(input_audio, output_wav, ffmpeg, sample_rate=48000):
     """
     tmp = output_wav.replace(".wav", "_tmp.wav")
     cmd = [
-        ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error", "-fflags", "+genpts", "-i", input_audio,
+        ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "fatal", "-fflags", "+genpts", "-i", input_audio,
         "-vn", "-af", "asetpts=PTS-STARTPTS", "-ar", str(sample_rate),
         "-c:a", "pcm_s16le", "-f", "wav", tmp,
     ]

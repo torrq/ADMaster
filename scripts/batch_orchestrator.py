@@ -272,7 +272,7 @@ def do_dtw(ep_num, mkv_file, ad_file, dry_run=False):
             # (std + nm)
             temp_file = out_file + ".temp.mkv"
             mux_cmd = [
-                FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
+                FFMPEG, "-y", "-hide_banner", "-loglevel", "fatal",
                 "-i", mkv_file,         # Video + Main audio
                 "-i", std_ad,           # Smooth-stitched AD (Standard)
                 "-i", nm_ad,            # Smooth-stitched AD (Night Mode)
@@ -318,7 +318,7 @@ def do_dtw(ep_num, mkv_file, ad_file, dry_run=False):
     # order
     temp_file = out_file + ".temp.mkv"
     remux_cmd = [
-        FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
+        FFMPEG, "-y", "-hide_banner", "-loglevel", "fatal",
         "-i", out_file,
         "-map", "0:v:0",
         "-map", "0:a:1",  # Original Main audio (was track 2) -> now track 1

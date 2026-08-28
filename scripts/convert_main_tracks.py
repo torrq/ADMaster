@@ -117,7 +117,7 @@ def convert_track(ffmpeg_bin, ffprobe_bin, input_path, base_title,
                 "-y",
                 "-hide_banner",
                 "-loglevel",
-                "error",
+                "fatal",
                 "-threads",
                 str(threads),
                 "-i",
@@ -184,7 +184,7 @@ def convert_track(ffmpeg_bin, ffprobe_bin, input_path, base_title,
         "-y",
         "-hide_banner",
         "-loglevel",
-        "error",
+        "fatal",
         "-threads",
         str(threads),
         "-fflags",
@@ -232,7 +232,7 @@ def convert_track(ffmpeg_bin, ffprobe_bin, input_path, base_title,
     else:
         print(f"\n  [3/3] Encoding Main Stereo AAC (alimiter)...", flush=True)
         cmd_stereo = [
-            ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-threads", str(
+            ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "fatal", "-threads", str(
                 threads),
             "-i", stereo_wav,
             "-af", "alimiter=level_in=1:level_out=0.98:limit=0.98",
@@ -265,7 +265,7 @@ def convert_track(ffmpeg_bin, ffprobe_bin, input_path, base_title,
             f"\n  [4/3] Encoding Main Night Mode AAC (loudnorm -16 LUFS)...",
             flush=True)
         cmd_night = [
-            ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-threads", str(
+            ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "fatal", "-threads", str(
                 threads),
             "-i", stereo_wav,
             "-af", "loudnorm=I=-16.0:TP=-1.5:LRA=11", "-ar", "48000",

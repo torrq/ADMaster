@@ -234,7 +234,7 @@ def predecode_to_mono_8k(ffmpeg_bin, input_path, scratch_dir,
         "-nostdin",
         "-hide_banner",
         "-loglevel",
-        "error",
+        "fatal",
         "-fflags",
         "+genpts",
         "-i",
@@ -576,7 +576,7 @@ def render_main_tracks(ffmpeg_bin, ref_path, base_title, out_dir, scratch_dir, c
                 "-nostdin",
                 "-hide_banner",
                 "-loglevel",
-                "error",
+                "fatal",
                 "-threads",
                 str(threads),
                 "-i",
@@ -639,7 +639,7 @@ def render_main_tracks(ffmpeg_bin, ref_path, base_title, out_dir, scratch_dir, c
         "-nostdin",
         "-hide_banner",
         "-loglevel",
-        "error",
+        "fatal",
         "-threads",
         str(threads),
         "-fflags",
@@ -690,7 +690,7 @@ def render_main_tracks(ffmpeg_bin, ref_path, base_title, out_dir, scratch_dir, c
             f"  Encoding Main Stereo AAC 2.0 (alimiter, full dynamic range)...",
             flush=True)
         cmd_stereo = [
-            ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "error", "-threads", str(
+            ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "fatal", "-threads", str(
                 threads),
             "-i", stereo_wav,
             "-af", "alimiter=level_in=1:level_out=0.98:limit=0.98",
@@ -720,7 +720,7 @@ def render_main_tracks(ffmpeg_bin, ref_path, base_title, out_dir, scratch_dir, c
             f"  Encoding Main Night Mode AAC 2.0 (loudnorm -16 LUFS)...",
             flush=True)
         cmd_night = [
-            ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "error", "-threads", str(
+            ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "fatal", "-threads", str(
                 threads),
             "-i", stereo_wav,
             "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
@@ -756,7 +756,7 @@ def mux_video_sample(ffmpeg_bin, video_src, audio_src,
             render_duration:.0f}s)...",
         flush=True)
     cmd_mux = [
-        ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+        ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "fatal",
         "-ss", "0", "-t", f"{render_duration:.3f}", "-i", video_src,
         "-i", audio_src,
         "-map", "0:v:0", "-map", "1:a:0",
@@ -877,7 +877,7 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                         "-nostdin",
                         "-hide_banner",
                         "-loglevel",
-                        "error",
+                        "fatal",
                         "-threads",
                         str(threads),
                         "-fflags",
@@ -911,7 +911,7 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                         "-nostdin",
                         "-hide_banner",
                         "-loglevel",
-                        "error",
+                        "fatal",
                         "-threads",
                         str(threads),
                         "-fflags",
@@ -1013,7 +1013,7 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                         f"  Encoding Synced AD Stereo AAC 2.0 (alimiter)...",
                         flush=True)
                     cmd_stereo = [
-                        ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "error", "-threads", str(
+                        ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "fatal", "-threads", str(
                             threads),
                         "-i", raw_stitched_wav,
                         "-af", "alimiter=level_in=1:level_out=0.98:limit=0.98",
@@ -1035,7 +1035,7 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                             f"  Encoding Synced AD Night Mode AAC 2.0 (loudnorm {target_i} LUFS)...",
                             flush=True)
                         cmd_night = [
-                            ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "error", "-threads", str(
+                            ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "fatal", "-threads", str(
                                 threads),
                             "-i", raw_stitched_wav,
                             "-af", f"loudnorm=I={target_i}:TP={target_tp}:LRA=11",
@@ -1092,7 +1092,7 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
             wav_filters.append(f"adelay={delay_ms}:all=1")
 
         cmd_wav = [
-            ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+            ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "fatal",
             "-threads", str(threads), "-fflags", "+genpts", "-i", path
         ]
         if preview_sec:
@@ -1114,7 +1114,7 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
         # Standard Stereo AAC from clean WAV
         print(f"  Encoding AD Stereo AAC 2.0 (alimiter)...", flush=True)
         cmd_stereo = [
-            ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "error", "-threads", str(
+            ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "fatal", "-threads", str(
                 threads),
             "-i", temp_wav,
             "-af", "alimiter=level_in=1:level_out=0.98:limit=0.98",
@@ -1140,7 +1140,7 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                 f"  Encoding AD Night Mode AAC 2.0 (loudnorm {target_i} LUFS)...",
                 flush=True)
             cmd_night = [
-                ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "error", "-threads", str(
+                ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "fatal", "-threads", str(
                     threads),
                 "-i", temp_wav,
                 "-af", f"loudnorm=I={target_i}:TP={target_tp}:LRA=11",
