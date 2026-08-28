@@ -1458,6 +1458,54 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
     print("\n================================================================================")
     print(f"SUCCESS: Processing completed for: {base_title}")
     print(f"Deliverables located in: {out_dir}")
+    print("--------------------------------------------------------------------------------")
+    print("FINAL SYNC SUMMARY:")
+
+    if args.convert_main:
+        print(f"  Main Audio     : Processed (Surround/Stereo/Night Mode)")
+
+    for name, params in sync_params.items():
+        method = params.get("method", "cross_correlation")
+        print(f"\n  AD Track [{name}]")
+        print(f"    Sync Method  : {method.upper()}")
+        
+        if method == "cross_correlation":
+            print(f"    Global Offset: {params['offset']:+.3f}s")
+            print(f"    Time Stretch : {params['atempo']:.5f}x")
+            print(f"    PAL Slowdown : {'Yes' if params.get('is_pal') else 'No'}")
+            print(f"    Confidence   : {params.get('confidence', 0) * 100:.1f}%")
+        elif method == "dtw":
+            dtw_plots_dir = os.path.join(scratch_dir, "describealign", "alignment_plots")
+            if os.path.exists(dtw_plots_dir):
+                found_plots = sorted(glob.glob(os.path.join(dtw_plots_dir, "*.txt")), key=os.path.getmtime, reverse=True)
+                if found_plots:
+                    try:
+                        import dtw_smooth_stitch
+                        segs = dtw_smooth_stitch.parse_alignment_plot(found_plots[0])
+                        print(f"    DTW Segments : {len(segs)} continuous blocks")
+                        if len(segs) > 1:
+                            print(f"    Double-Check Cut Times (where AD track shifts):")
+                            for i, s in enumerate(segs):
+                                m_s = s["master_start"]
+                                h = int(m_s // 3600)
+                                m = int((m_s % 3600) // 60)
+                                sec = m_s % 60
+                                
+                                offset = s["master_start"] - s["audio_start"]
+                                
+                                # Only print actual structural cuts (where offset changes significantly)
+                                if i == 0:
+                                    print(f"      - Seg 1 starts at {h:02d}:{m:02d}:{sec:06.3f} (initial offset: {offset:+.3f}s)")
+                                else:
+                                    prev = segs[i-1]
+                                    prev_offset = prev["master_start"] - prev["audio_start"]
+                                    
+                                    # If offset changed by more than 50ms, it's a real structural cut/jump
+                                    if abs(offset - prev_offset) > 0.05:
+                                        print(f"      - Seg {i+1} jumps to {h:02d}:{m:02d}:{sec:06.3f} (offset shifted to {offset:+.3f}s)")
+                    except Exception as e:
+                        print(f"    [Error parsing DTW plot for summary: {e}]")
+
     print("================================================================================\n")
     return True
 
