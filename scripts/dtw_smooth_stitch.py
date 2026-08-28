@@ -569,6 +569,23 @@ def smooth_stitch_audio(segments, samples, sr,
                 weight1 = weight1[:, np.newaxis]
                 audio = (audio[idx0] * weight0 + audio[idx1] * weight1).astype(np.float32)
 
+        # AIRTIGHT CLAMP: Prevent any segment from bleeding into the next segment's timeline.
+        # This handles extreme DescribeAlign cuts (e.g. 10s of deleted AD audio squeezed into 1ms of Master video)
+        if i < len(snapped) - 1:
+            next_seg = segments[i+1]
+            next_s = snapped[i+1][0]
+            next_audio_start_orig = int(next_seg["audio_start"] * sr)
+            next_audio_shift = next_s - next_audio_start_orig
+            next_implied_rate = next_seg.get("implied_rate", 1.0)
+            next_master_shift = int(next_audio_shift / next_implied_rate) if next_implied_rate > 0 else next_audio_shift
+            next_master_s = int(next_seg["master_start"] * sr) + next_master_shift
+            
+            allowed_len = (next_master_s - master_s) + xf_samples
+            if allowed_len < 0:
+                allowed_len = 0
+            if len(audio) > allowed_len:
+                audio = audio[:allowed_len]
+
         if canvas.ndim > 1 and audio.ndim == 1:
             audio = audio[:, np.newaxis]
         elif canvas.ndim == 1 and audio.ndim > 1:
