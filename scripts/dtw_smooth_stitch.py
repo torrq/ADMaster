@@ -455,18 +455,19 @@ def smooth_stitch_audio(segments, samples, sr,
                     f"  [WOBBLE DETECTED] Seg {
                         i +
                         1}: Ignoring offset shift to {
-                        target_offset:+.3f}s, maintaining 1.0x native playback",
+                        target_offset:+.3f}s, maintaining {
+                        current_offset:+.3f}s",
                     flush=True)
-                # It's a hallucination (e.g. commercial break). Force 1.0x native playback.
+                # It's a hallucination. Force 1.0x native playback.
                 seg["implied_rate"] = 1.0
-                
-                # Truncate the audio length to prevent it from overlapping into the next segment
-                # Since we are playing at 1.0x, it can only play for master_dur seconds.
-                if audio_dur > master_dur:
-                    seg["audio_end"] = seg["audio_start"] + master_dur
             else:
                 current_offset = target_offset
 
+        # Remap audio boundaries to conform to the current true offset.
+        # This is critical: after a legitimate offset jump, all subsequent
+        # segments must read from the corrected audio position.
+        seg["audio_start"] = seg["master_start"] - current_offset
+        seg["audio_end"] = seg["master_end"] - current_offset
         seg["rate_pct"] = 0.0
         filtered_segments.append(seg)
 
@@ -536,6 +537,8 @@ def smooth_stitch_audio(segments, samples, sr,
         # Apply the implied rate to the shift
         master_shift = int(audio_shift / implied_rate) if implied_rate > 0 else audio_shift
         master_s = int(seg["master_start"] * sr) + master_shift
+        if master_s < 0:
+            master_s = 0
 
         # Extend e by xf_samples if not the last segment, so it overlaps with
         # the next
