@@ -447,6 +447,7 @@ def smooth_stitch_audio(segments, samples, sr,
             implied_rate = audio_dur / master_dur
         else:
             implied_rate = 1.0
+        seg["implied_rate"] = implied_rate
 
         if abs(target_offset - current_offset) > 0.05:
             if abs(1.0 - implied_rate) > 0.001 and audio_dur > 2.0 and master_dur > 2.0:
@@ -529,6 +530,29 @@ def smooth_stitch_audio(segments, samples, sr,
             e = min(len(samples), e + xf_samples)
 
         audio = samples[s:e].copy()
+
+        # Layer 3.5 requires the original implied_rate from Layer 0 before VAD nudging/Wobble correction altered it
+        implied_rate = seg.get("implied_rate", 1.0)
+
+        # Layer 3.5: If the rate drift is genuine but tiny (< 0.1%), seamlessly
+        # stretch the audio segment using linear interpolation to perfectly fill
+        # the master duration. This completely prevents continuous timeline drift
+        # without inserting gaps, overlaps, or WSOLA artifacts.
+        if 0.000001 < abs(1.0 - implied_rate) <= 0.001 and len(audio) > 0:
+            target_len = int(len(audio) / implied_rate)
+            print(f"  [STRETCH] Resampling Seg {i+1} by {1.0/implied_rate:.5f}x to perfectly correct {abs(1.0 - implied_rate)*100:.3f}% timeline drift", flush=True)
+            
+            if audio.ndim == 1:
+                x_old = np.linspace(0, 1, len(audio), dtype=np.float32)
+                x_new = np.linspace(0, 1, target_len, dtype=np.float32)
+                audio = np.interp(x_new, x_old, audio).astype(np.float32)
+            else:
+                x_old = np.linspace(0, 1, len(audio), dtype=np.float32)
+                x_new = np.linspace(0, 1, target_len, dtype=np.float32)
+                new_audio = np.zeros((target_len, audio.shape[1]), dtype=np.float32)
+                for ch in range(audio.shape[1]):
+                    new_audio[:, ch] = np.interp(x_new, x_old, audio[:, ch])
+                audio = new_audio.astype(np.float32)
 
         if canvas.ndim > 1 and audio.ndim == 1:
             audio = audio[:, np.newaxis]
