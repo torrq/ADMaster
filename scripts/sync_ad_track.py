@@ -857,7 +857,8 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                     flush=True)
                 method = "cross_correlation"
             else:
-                dtw_scratch = os.path.join(scratch_dir, "describealign")
+                clean_name = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
+                dtw_scratch = os.path.join(scratch_dir, "describealign", clean_name)
                 dtw_plots_dir = os.path.join(dtw_scratch, "alignment_plots")
                 dtw_out_dir = os.path.join(dtw_scratch, "videos_with_ad")
                 os.makedirs(dtw_plots_dir, exist_ok=True)
@@ -1476,7 +1477,8 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
             print(f"    PAL Slowdown : {'Yes' if params.get('is_pal') else 'No'}")
             print(f"    Confidence   : {params.get('confidence', 0) * 100:.1f}%")
         elif method == "dtw":
-            dtw_plots_dir = os.path.join(scratch_dir, "describealign", "alignment_plots")
+            clean_name = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
+            dtw_plots_dir = os.path.join(scratch_dir, "describealign", clean_name, "alignment_plots")
             if os.path.exists(dtw_plots_dir):
                 found_plots = sorted(glob.glob(os.path.join(dtw_plots_dir, "*.txt")), key=os.path.getmtime, reverse=True)
                 if found_plots:
