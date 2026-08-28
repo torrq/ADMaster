@@ -35,7 +35,8 @@ Master tool for synchronizing external Audio Description tracks to reference med
   $$\text{asetrate} = \text{input\_sr} \times \frac{23.976024}{25.0}$$
 * **Strict ITU-R BS.775 2.0 Downmixing**: Enforces standard downmix matrix (`pan=stereo|c0=c0+0.7071*c2+0.7071*c4|c1=c1+0.7071*c2+0.7071*c5`), `-ac 2`, and `-ar 48000`.
 * **Overwrite Protection (`--overwrite` / `-f` / `--force-overwrite`)**: Prevents re-rendering deliverables that already exist in `output/` by default, saving CPU and time during queue re-runs.
-* **Local Machine Config Support**: Loads settings and paths from `config.local.json` or `config.json` (falls back to `config.default.json`).
+* **Detailed Final Sync Summary**: At the end of every successful run, outputs a comprehensive report detailing each track's global offset, sample-rate stretch, and (if DTW was used) a curated list of structural cut timestamps for easy manual verification.
+* **Local Machine Config Support**: Loads settings and paths from `config.local.json` or `config.json` (falls back to `config.default.json`). Toggleable `"debug_mode"` (or CLI `--debug`) enables verbosity for troubleshooting.
 
 ### Common Commands:
 ```powershell

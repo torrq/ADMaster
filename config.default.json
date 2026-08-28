@@ -32,5 +32,8 @@
 
   // Whether to overwrite existing deliverables in the output directory (Default: false).
   // When false, existing output files are preserved and re-renders are skipped.
-  "default_overwrite": false
+  "default_overwrite": false,
+
+  // Enable verbose debug logging (useful for troubleshooting DTW mapping and cut points)
+  "debug_mode": false
 }

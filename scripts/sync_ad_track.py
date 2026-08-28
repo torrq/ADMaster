@@ -995,7 +995,8 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                     samples, sr = dtw_smooth_stitch.load_wav(ad_da_wav)
                     stitched = dtw_smooth_stitch.smooth_stitch_audio(
                         segments, samples, sr,
-                        crossfade_ms=50, vad_search_ms=500, vad_threshold=0.02, silence_ms=200
+                        crossfade_ms=50, vad_search_ms=500, vad_threshold=0.02, silence_ms=200,
+                        debug=getattr(args, "debug", False)
                     )
 
                     raw_stitched_wav = os.path.join(
@@ -1662,13 +1663,21 @@ EBU R128 loudness normalization, and MKV sample multiplexing.
     parser.add_argument(
         "--keep-scratch",
         action="store_true",
-        help="Do not delete temporary analysis WAVs on completion")
+        help="Keep temporary WAV files in scratch folder for debugging"
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable verbose debug logging (useful for troubleshooting DTW mapping and cut points)"
+    )
     parser.add_argument(
         "--ffmpeg",
         default=DEFAULT_FFMPEG,
         help="Path to ffmpeg executable")
 
     args = parser.parse_args()
+    args.debug = args.debug or CONFIG.get("debug_mode", False)
+    
     ffmpeg_bin, ffprobe_bin = locate_binaries(args.ffmpeg)
 
     target_dir = args.dir_opt or args.movie_dir

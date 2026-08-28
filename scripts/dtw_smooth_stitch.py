@@ -417,7 +417,8 @@ def crossfade_stitch(segments_audio, crossfade_samples):
 
 def smooth_stitch_audio(segments, samples, sr,
                         crossfade_ms=50, vad_search_ms=500,
-                        vad_threshold=0.02, silence_ms=200):
+                        vad_threshold=0.02, silence_ms=200,
+                        debug=False):
     """
     Full 3-layer smooth stitching pipeline.
 
@@ -606,10 +607,11 @@ def smooth_stitch_audio(segments, samples, sr,
 
         write_e = min(master_s + len(audio), canvas_len)
         read_e = write_e - master_s
-        print(
-            f"[DEBUG] Seg {i}: master_s={master_s}, write_e={write_e}, audio_len={
-                len(audio)}, read_e={read_e}",
-            flush=True)
+        if debug:
+            print(
+                f"[DEBUG] Seg {i}: master_s={master_s}, write_e={write_e}, audio_len={
+                    len(audio)}, read_e={read_e}",
+                flush=True)
         if read_e > 0:
             canvas[master_s:write_e] += audio[:read_e]
 
@@ -620,7 +622,7 @@ def smooth_stitch_audio(segments, samples, sr,
 def run_smooth_stitch(plot_file, input_audio, output_audio,
                       crossfade_ms=50, vad_search_ms=500,
                       vad_threshold=0.02, silence_ms=200,
-                      scratch_dir=None):
+                      scratch_dir=None, debug=False):
     """
     End-to-end smooth stitch: parse plot -> decode -> stitch -> encode.
 
@@ -687,6 +689,7 @@ def run_smooth_stitch(plot_file, input_audio, output_audio,
         vad_search_ms=vad_search_ms,
         vad_threshold=vad_threshold,
         silence_ms=silence_ms,
+        debug=debug,
     )
 
     out_duration = len(stitched) / sr
@@ -785,6 +788,8 @@ Examples:
                         help="Required consecutive silence for clean boundary (default: 200)")
     parser.add_argument("--scratch-dir", default=None,
                         help="Working directory for intermediate files")
+    parser.add_argument("--debug", action="store_true",
+                        help="Enable detailed debug logging (cut coordinates and lengths)")
     args = parser.parse_args()
 
     try:
@@ -797,6 +802,7 @@ Examples:
             vad_threshold=args.vad_threshold,
             silence_ms=args.silence_ms,
             scratch_dir=args.scratch_dir,
+            debug=args.debug,
         )
     except Exception as e:
         print(f"\n  [ERROR] {e}", file=sys.stderr)

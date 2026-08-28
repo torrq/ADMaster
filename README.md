@@ -125,7 +125,10 @@ To configure custom binary paths, encoding threads, or loudness targets:
   "default_anchors": 100,
 
   // Overwrite existing output files (default: false)
-  "default_overwrite": false
+  "default_overwrite": false,
+
+  // Enable verbose debug logging
+  "debug_mode": false
 }
 ```
 
