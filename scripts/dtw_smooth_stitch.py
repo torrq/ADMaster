@@ -542,17 +542,19 @@ def smooth_stitch_audio(segments, samples, sr,
             target_len = int(len(audio) / implied_rate)
             print(f"  [STRETCH] Resampling Seg {i+1} by {1.0/implied_rate:.5f}x to perfectly correct {abs(1.0 - implied_rate)*100:.3f}% timeline drift", flush=True)
             
+            # Use float64 for indices to prevent precision loss (float32 maxes out at 16M unique values)
+            indices = np.linspace(0, len(audio) - 1, target_len, dtype=np.float64)
+            idx0 = np.floor(indices).astype(np.int32)
+            idx1 = np.minimum(idx0 + 1, len(audio) - 1)
+            weight1 = (indices - idx0).astype(np.float32)
+            weight0 = 1.0 - weight1
+            
             if audio.ndim == 1:
-                x_old = np.linspace(0, 1, len(audio), dtype=np.float32)
-                x_new = np.linspace(0, 1, target_len, dtype=np.float32)
-                audio = np.interp(x_new, x_old, audio).astype(np.float32)
+                audio = (audio[idx0] * weight0 + audio[idx1] * weight1).astype(np.float32)
             else:
-                x_old = np.linspace(0, 1, len(audio), dtype=np.float32)
-                x_new = np.linspace(0, 1, target_len, dtype=np.float32)
-                new_audio = np.zeros((target_len, audio.shape[1]), dtype=np.float32)
-                for ch in range(audio.shape[1]):
-                    new_audio[:, ch] = np.interp(x_new, x_old, audio[:, ch])
-                audio = new_audio.astype(np.float32)
+                weight0 = weight0[:, np.newaxis]
+                weight1 = weight1[:, np.newaxis]
+                audio = (audio[idx0] * weight0 + audio[idx1] * weight1).astype(np.float32)
 
         if canvas.ndim > 1 and audio.ndim == 1:
             audio = audio[:, np.newaxis]

@@ -866,7 +866,7 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                 # Pre-decode reference mono WAV for DescribeAlign
                 ref_da_wav = os.path.join(
                     scratch_dir, "ref_analysis_48k_mono.wav")
-                if overwrite or not (os.path.exists(ref_da_wav) and os.path.getsize(ref_da_wav) > 1000):
+                if not (os.path.exists(ref_da_wav) and os.path.getsize(ref_da_wav) > 1000):
                     print(
                         f"  Pre-decoding Reference Audio to 48kHz mono WAV for DescribeAlign...",
                         flush=True)
@@ -899,7 +899,7 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                 # sample rate PAL slowdown if PAL)
                 ad_da_wav = os.path.join(
                     scratch_dir, f"{name}_analysis_48k_mono.wav")
-                if overwrite or not (os.path.exists(ad_da_wav) and os.path.getsize(ad_da_wav) > 1000):
+                if not (os.path.exists(ad_da_wav) and os.path.getsize(ad_da_wav) > 1000):
                     print(
                         f"  Pre-decoding AD Audio to 48kHz mono WAV for DescribeAlign (PAL={is_pal})...",
                         flush=True)
@@ -937,7 +937,7 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                     key=os.path.getmtime,
                     reverse=True)
                 plot_file = None
-                if existing_plots and os.path.getsize(existing_plots[0]) > 50 and not overwrite:
+                if existing_plots and os.path.getsize(existing_plots[0]) > 50:
                     plot_file = existing_plots[0]
                     print(
                         f"  Using existing alignment plot: {plot_file}",
