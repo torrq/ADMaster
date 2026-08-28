@@ -81,9 +81,10 @@ python scripts/batch_orchestrator.py --dry-run
 
 Post-processor for DescribeAlign timestamp maps. Re-stitches AD audio using a transparent **4-layer transition smoothing pipeline**:
 
-1. **Layer 1 -- VAD-Aware Cut Nudging**: Analyzes center/narrator RMS energy around segment boundaries. If a cut point lands mid-speech, the cut is automatically nudged forward or backward to the nearest natural silence gap (+/-500ms search window, 200ms hangover).
-2. **Layer 2 -- Zero-Crossing Snapping**: Micro-adjusts boundaries (+/-2ms) to land on exact waveform zero crossings, eliminating DC offset pop artifacts.
-3. **Layer 3 -- Equal-Power Crossfade & Sinc Resampling**: Blends segment junctions using 50ms constant-power cosine crossfades ($\cos^2 + \sin^2 = 1$). Applies bandlimited sinc resampling for genuine rate changes and bit-perfect native PCM passthrough for 1.0x segments.
+1. **Layer 0 -- Wobble Filtering**: Differentiates between DTW tracking hallucinations (> 0.1% drift) and genuine continuous clock drifts (< 0.1% drift). Rejects hallucinations to force strict 1.0x native playback across structural film splices.
+2. **Layer 1 -- VAD-Aware Cut Nudging**: Analyzes center/narrator RMS energy around segment boundaries. If a cut point lands mid-speech, the cut is automatically nudged forward or backward to the nearest natural silence gap (+/-500ms search window, 200ms hangover).
+3. **Layer 2 -- Zero-Crossing Snapping**: Micro-adjusts boundaries (+/-2ms) to land on exact waveform zero crossings, eliminating DC offset pop artifacts.
+4. **Layer 3 -- Float64 Resampling & Equal-Power Crossfade**: Automatically applies high-precision loat64 linear interpolation to eliminate continuous timeline drifts without WSOLA artifacts. Blends segment junctions using 50ms constant-power cosine crossfades ($\cos^2 + \sin^2 = 1$).
 
 ### Common Commands:
 ```powershell
