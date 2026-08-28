@@ -443,8 +443,13 @@ def smooth_stitch_audio(segments, samples, sr,
         master_dur = seg["master_end"] - seg["master_start"]
         target_offset = seg["master_end"] - seg["audio_end"]
 
+        if master_dur > 0:
+            implied_rate = audio_dur / master_dur
+        else:
+            implied_rate = 1.0
+
         if abs(target_offset - current_offset) > 0.05:
-            if audio_dur > 2.0 and master_dur > 2.0:
+            if abs(1.0 - implied_rate) > 0.001 and audio_dur > 2.0 and master_dur > 2.0:
                 print(
                     f"  [WOBBLE DETECTED] Seg {
                         i +
@@ -629,7 +634,7 @@ def run_smooth_stitch(plot_file, input_audio, output_audio,
     print(
         f"\n  Stitched result: {
             out_duration:.1f}s ({
-            len(stitched):,        } samples)")
+            len(stitched):,}  samples)")
 
     # -- Write intermediate WAV --
     raw_wav = os.path.join(scratch_dir, f"{basename}_stitched_raw.wav")
