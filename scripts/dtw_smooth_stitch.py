@@ -415,6 +415,45 @@ def crossfade_stitch(segments_audio, crossfade_samples):
 
 # --- Main Pipeline -----------------------------------------------------------
 
+def match_volume(master, ad, sr, block_sec=1.0):
+    """
+    Computes the median RMS volume of 1-second blocks for both tracks (ignoring absolute silence)
+    and scales the master audio to match the AD track's ambient background volume.
+    """
+    block_samps = int(sr * block_sec)
+    
+    def get_rms(arr):
+        # Convert to mono for calculation
+        if arr.ndim > 1:
+            arr = np.mean(arr, axis=1)
+        
+        n_blocks = len(arr) // block_samps
+        if n_blocks == 0:
+            return np.array([])
+        
+        blocks = arr[:n_blocks * block_samps].reshape(n_blocks, block_samps)
+        return np.sqrt(np.mean(blocks**2, axis=1))
+
+    m_rms = get_rms(master)
+    a_rms = get_rms(ad)
+    
+    # Ignore absolute silence blocks
+    m_rms = m_rms[m_rms > 0.0001]
+    a_rms = a_rms[a_rms > 0.0001]
+    
+    if len(m_rms) == 0 or len(a_rms) == 0:
+        return master
+        
+    m_med = np.median(m_rms)
+    a_med = np.median(a_rms)
+    
+    if m_med > 0:
+        scale = a_med / m_med
+        print(f"  [VOLUME MATCH] Scaling Master Audio by {scale:.3f}x to match AD track ambient RMS", flush=True)
+        return master * scale
+    return master
+
+
 def smooth_stitch_audio(segments, samples, sr,
                         crossfade_ms=50, vad_search_ms=500,
                         vad_threshold=0.02, silence_ms=200,
@@ -549,6 +588,7 @@ def smooth_stitch_audio(segments, samples, sr,
     channels = samples.shape[1] if samples.ndim > 1 else 1
     
     if master_samples is not None:
+        master_samples = match_volume(master_samples, samples, sr, block_sec=1.0)
         if master_samples.ndim == 1 and channels > 1:
             master_samples = np.column_stack([master_samples] * channels)
         elif master_samples.ndim > 1 and channels == 1:
