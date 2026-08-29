@@ -9,7 +9,7 @@ License: MIT
 
 Overview:
   High-performance acoustic cross-correlation alignment, DescribeAlign Dynamic
-  Time Warping (DTW) piecewise synchronization with 3-layer transition smoothing
+  Time Warping (DTW) piecewise synchronization with Multilayer transition smoothing
   (VAD + Zero-Crossing + 50ms Crossfading), true ITU-R BS.775 2.0 downmixing,
   2-pass EBU R128 loudness normalization, and MKV sample multiplexing.
 
@@ -988,7 +988,7 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                         import dtw_smooth_stitch
 
                     print(
-                        f"  Executing 3-Layer Transition Smoothing (VAD + Zero-Crossing + 50ms Crossfade)...",
+                        f"  Executing Multilayer Transition Smoothing (VAD + Zero-Crossing + 50ms Crossfade)...",
                         flush=True)
                     segments = dtw_smooth_stitch.parse_alignment_plot(
                         plot_file)
@@ -1318,7 +1318,7 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
         print(
             f"Convert Main    : YES (Surround AC3 + True 2.0 Stereo AAC + Night Mode AAC)")
     if args.force_dtw:
-        print(f"DTW Mode        : FORCED (DescribeAlign + 3-layer smooth stitch)")
+        print(f"DTW Mode        : FORCED (DescribeAlign + Multilayer smooth stitch)")
     if args.no_pal:
         print(f"PAL Mode        : DISABLED (1.0x native speed enforced)")
     elif args.pal:
@@ -1520,7 +1520,7 @@ def main():
 ================================================================================
 Universal Audio Description (AD) & Main Audio Sync & Encoding Tool
 ================================================================================
-Acoustic cross-correlation, DescribeAlign Dynamic Time Warping (DTW) with 3-layer
+Acoustic cross-correlation, DescribeAlign Dynamic Time Warping (DTW) with Multilayer
 smoothing (VAD + Zero-Crossing + 50ms Crossfade), ITU-R BS.775 2.0 downmixing,
 EBU R128 loudness normalization, and MKV sample multiplexing.
 """,

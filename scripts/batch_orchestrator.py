@@ -249,7 +249,7 @@ def do_dtw(ep_num, mkv_file, ad_file, dry_run=False):
             f"*{basename}"))
 
     if plot_files:
-        # -- Smooth Stitch Path (3-layer transitions) --
+        # -- Smooth Stitch Path (Multilayer transitions) --
         print(
             f"[{ep_num}] Found alignment plot -- applying smooth stitch with VAD transitions...")
 

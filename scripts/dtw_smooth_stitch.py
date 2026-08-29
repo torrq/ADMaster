@@ -3,7 +3,7 @@
 """
 dtw_smooth_stitch.py - Smooth DTW Audio Stitcher with VAD-Aware Transitions
 
-Replaces the old hard-cut `build_dtw_stitch.py` with a 3-layer transition
+Replaces the old hard-cut `build_dtw_stitch.py` with a Multilayer transition
 smoothing pipeline that prevents narrator speech from being split at
 segment boundaries:
 
@@ -420,7 +420,7 @@ def smooth_stitch_audio(segments, samples, sr,
                         vad_threshold=0.02, silence_ms=200,
                         debug=False, master_samples=None):
     """
-    Full 3-layer smooth stitching pipeline.
+    Full Multilayer smooth stitching pipeline.
 
     Args:
         segments:  List of dicts from parse_alignment_plot() with audio_start/audio_end
@@ -759,7 +759,7 @@ def run_smooth_stitch(plot_file, input_audio, output_audio,
 
     # -- Smooth stitch --
     print(f"\n{'-' * 50}")
-    print("  APPLYING 3-LAYER TRANSITION SMOOTHING")
+    print("  APPLYING MULTILAYER TRANSITION SMOOTHING")
     print(f"{'-' * 50}")
 
     stitched = smooth_stitch_audio(

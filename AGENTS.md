@@ -24,7 +24,7 @@ For encoding specs, FFmpeg rules, and detailed workflow instructions, see the **
 * **Primary Mandate**: Always use `sync_ad_track.py` for queue and movie processing rather than creating custom one-off scripts.
 * **Directory Auto-Discovery**: Passing a folder path (e.g. `python scripts/sync_ad_track.py "F:\uploads\queue\<Movie>"`) automatically pairs `source/*` with all AD tracks in `tosync/*`.
 * **100-Anchor FFT Cross-Correlation**: Samples 100 anchors evenly across 5%-88% of the timeline via fast FFT in memory (pre-decoding streams once to 8kHz mono WAV in `scratch/`).
-* **Direct DTW Fast-Path (`--force-dtw`)**: Bypasses the 100-anchor search entirely and executes DescribeAlign DTW piecewise alignment and 3-layer transition smoothing directly.
+* **Direct DTW Fast-Path (`--force-dtw`)**: Bypasses the 100-anchor search entirely and executes DescribeAlign DTW piecewise alignment and Multilayer transition smoothing directly.
 * **Stream Selection (`--ref-stream`)**: Choose specific audio tracks from multi-track MKVs (e.g. `--ref-stream 0:a:1`).
 * **Dynamic Sample-Rate PAL Handling (`--pal` / `--no-pal`)**: Probes input sample rates (44.1k vs 48k) to compute exact dynamic clock values for PAL 25fps slowdowns:
   $$\text{asetrate} = \text{input\_sr} \times \frac{23.976024}{25.0}$$
@@ -59,7 +59,7 @@ For encoding specs, FFmpeg rules, and detailed workflow instructions, see the **
   4. Stitch with **50ms equal-power cosine crossfades** during silence transitions.
 
 ### dtw_smooth_stitch.py (Post-DescribeAlign Transition Smoother)
-Replaces the old hard-cut `build_dtw_stitch.py`. Parses describealign alignment plots and re-stitches AD audio through a **3-layer transition smoothing pipeline**:
+Replaces the old hard-cut `build_dtw_stitch.py`. Parses describealign alignment plots and re-stitches AD audio through a **Multilayer transition smoothing pipeline**:
 
 1. **Layer 1 -- VAD-Aware Cut Nudging**: At each segment boundary, checks RMS energy in 50ms analysis windows. If speech is active at a cut point, the outgoing boundary is extended forward (or incoming pulled backward) to the nearest silence gap. Configurable: `+/-500ms` search, `200ms` consecutive silence hangover, `0.02` RMS threshold.
 2. **Layer 2 -- Zero-Crossing Snapping**: After VAD nudging, each cut point is snapped to the nearest waveform zero crossing within `+/-2ms` to eliminate DC-offset pops and sub-sample clicks.

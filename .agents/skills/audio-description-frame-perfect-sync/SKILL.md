@@ -74,7 +74,7 @@ python scripts/sync_ad_track.py "F:\uploads\queue\<MovieName>" --preview 180
 **Key Features**:
 * **Directory Auto-Discovery**: Point to any folder containing `source/` and `tosync/`. Automatically resolves reference audio/video, pairs all AD/commentary tracks, and outputs deliverables to `output/`.
 * **100-Anchor FFT Cross-Correlation**: Samples 100 anchors across the movie via fast FFT in memory (pre-decoding streams once to 8kHz mono WAV in `scratch/`).
-* **Direct DTW Bypass (`--force-dtw`)**: Bypasses the 100-anchor cross-correlation search entirely and jumps straight to DescribeAlign DTW piecewise alignment and 3-layer smooth stitching.
+* **Direct DTW Bypass (`--force-dtw`)**: Bypasses the 100-anchor cross-correlation search entirely and jumps straight to DescribeAlign DTW piecewise alignment and Multilayer smooth stitching.
 * **Stream Selection (`--ref-stream`)**: Specify exact audio stream in multi-track MKVs (e.g. `--ref-stream 0:a:1`).
 * **Dynamic Sample-Rate PAL Handling (`--pal` / `--no-pal`)**: Probes input sample rates (44.1k vs 48k) to compute exact dynamic clock values for PAL 25fps slowdowns:
   $$\text{asetrate} = \text{input\_sr} \times \frac{23.976024}{25.0}$$
@@ -122,7 +122,7 @@ ffmpeg -y -i "describealign_output.mkv" -map 0:v:0 -map 0:a:1 -map 0:a:0 -c copy
 * Creates `videos_with_ad/` and `alignment_plots/` directories -- run from `scratch/` or clean up after.
 
 ### Transition Smoothing (dtw_smooth_stitch.py)
-DescribeAlign's raw output can slice through narrator speech mid-sentence at segment boundaries. The `dtw_smooth_stitch.py` script fixes this with a **3-layer transition pipeline** applied after describealign produces its alignment plot:
+DescribeAlign's raw output can slice through narrator speech mid-sentence at segment boundaries. The `dtw_smooth_stitch.py` script fixes this with a **Multilayer transition pipeline** applied after describealign produces its alignment plot:
 
 1. **Layer 1 -- VAD-Aware Cut Nudging**: At each segment boundary, checks RMS energy in 50ms windows. If speech is active at a cut, extends the outgoing boundary forward (or pulls incoming backward) to the nearest silence gap. Parameters: `+/-500ms` search, `200ms` silence hangover, `0.02` RMS threshold.
 2. **Layer 2 -- Zero-Crossing Snapping**: Snaps each cut to the nearest waveform zero crossing within `+/-2ms` to eliminate DC-offset pops.
