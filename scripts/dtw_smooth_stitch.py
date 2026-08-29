@@ -468,9 +468,34 @@ def smooth_stitch_audio(segments, samples, sr,
         # This is critical: after a legitimate offset jump, all subsequent
         # segments must read from the corrected audio position.
         seg["audio_start"] = seg["master_start"] - current_offset
-        seg["audio_end"] = seg["master_end"] - current_offset
+        # Preserve genuine implied_rate (don't force master_dur == audio_dur if drift is real)
+        seg["audio_end"] = seg["audio_start"] + (master_dur * implied_rate)
         seg["rate_pct"] = 0.0
         filtered_segments.append(seg)
+
+    # Pass 2: Prevent Audio Replay (Backward Jumps)
+    # If the AD track is missing a scene, DescribeAlign might force a continuous master timeline
+    # by jumping backwards in the audio (replaying audio). We fix this by truncating the previous
+    # segment, creating a natural silence gap in the master timeline.
+    for i in range(len(filtered_segments) - 1):
+        curr_seg = filtered_segments[i]
+        next_seg = filtered_segments[i+1]
+        
+        if next_seg["audio_start"] < curr_seg["audio_end"]:
+            overlap = curr_seg["audio_end"] - next_seg["audio_start"]
+            if overlap > 0.01:
+                print(f"  [GAP FIX] Seg {i+1} overlaps Seg {i+2} by {overlap:.3f}s. Truncating Seg {i+1} to insert silence.", flush=True)
+                if next_seg["audio_start"] <= curr_seg["audio_start"]:
+                    curr_seg["audio_end"] = curr_seg["audio_start"]
+                else:
+                    curr_seg["audio_end"] = next_seg["audio_start"]
+                
+                new_audio_dur = curr_seg["audio_end"] - curr_seg["audio_start"]
+                impl_rate = curr_seg.get("implied_rate", 1.0)
+                if impl_rate > 0:
+                    curr_seg["master_end"] = curr_seg["master_start"] + (new_audio_dur / impl_rate)
+                else:
+                    curr_seg["master_end"] = curr_seg["master_start"]
 
     segments = filtered_segments
 
