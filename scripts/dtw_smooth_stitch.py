@@ -454,7 +454,7 @@ def smooth_stitch_audio(segments, samples, sr,
             is_wobble = False
             if abs(1.0 - implied_rate) > 0.05:
                 is_wobble = True
-            elif abs(1.0 - implied_rate) > 0.001 and master_dur < 300.0:
+            elif abs(1.0 - implied_rate) > 0.002 and master_dur < 300.0:
                 is_wobble = True
 
             if is_wobble:
