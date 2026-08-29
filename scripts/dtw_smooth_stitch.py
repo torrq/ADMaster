@@ -473,7 +473,7 @@ def smooth_stitch_audio(segments, samples, sr,
     # Layer 0: DescribeAlign Wobble Filtering
     # -------------------------------------------------------------------------
     print(
-        "\n  Layer 0: Filtering DTW Hallucinations (Wobble Correction)...",
+        "\n  Layer 0: Filtering DTW Hallucinations (Wobble Correction + Micro-Segment Absorption)...",
         flush=True)
     filtered_segments = []
     current_offset = segments[0]["master_start"] - segments[0]["audio_start"]
@@ -482,12 +482,14 @@ def smooth_stitch_audio(segments, samples, sr,
         audio_dur = seg["audio_end"] - seg["audio_start"]
         master_dur = seg["master_end"] - seg["master_start"]
         target_offset = seg["master_end"] - seg["audio_end"]
+        seg["original_master_dur"] = master_dur  # preserve for Layer 0.5
 
         if master_dur > 0:
             implied_rate = audio_dur / master_dur
         else:
             implied_rate = 1.0
         seg["implied_rate"] = implied_rate
+        seg["original_implied_rate"] = implied_rate  # preserve for Layer 0.5
 
         if abs(target_offset - current_offset) > 0.05:
             is_wobble = False
@@ -511,6 +513,43 @@ def smooth_stitch_audio(segments, samples, sr,
         seg["audio_end"] = seg["audio_start"] + (master_dur * implied_rate)
         seg["rate_pct"] = 0.0
         filtered_segments.append(seg)
+
+    # -- Layer 0.5: Micro-Segment Absorption --
+    # DescribeAlign hallucinates tiny micro-segments (<500ms) with absurd rate
+    # changes (1000%+) at DTW optimizer local minima. These don't represent real
+    # structural edits but force unnecessary cut boundaries that slice through
+    # speech. Absorb them into their neighbors to eliminate phantom cuts.
+    absorb_count = 0
+    absorbed = []
+    for i, seg in enumerate(filtered_segments):
+        original_master_dur = seg.get("original_master_dur", seg["master_end"] - seg["master_start"])
+        original_rate = seg.get("original_implied_rate", seg["implied_rate"])
+        rate_dev = abs(1.0 - original_rate)
+
+        is_micro_hallucination = original_master_dur < 0.5 and rate_dev > 0.05
+
+        if is_micro_hallucination and len(absorbed) > 0:
+            # Merge into previous segment by extending its timeline
+            prev = absorbed[-1]
+            prev_rate = prev["implied_rate"]
+            added_master = seg["master_end"] - prev["master_end"]
+            prev["master_end"] = seg["master_end"]
+            prev["audio_end"] += added_master * prev_rate
+            absorb_count += 1
+            print(
+                f"  [ABSORB] Micro-seg {i+1} ({original_master_dur*1000:.0f}ms, "
+                f"original rate {original_rate:.2f}x) merged into Seg {len(absorbed)}",
+                flush=True)
+        else:
+            absorbed.append(seg)
+
+    if absorb_count > 0:
+        print(
+            f"  [ABSORB] Removed {absorb_count} hallucinated micro-segments "
+            f"({len(filtered_segments)} -> {len(absorbed)} segments)", flush=True)
+        filtered_segments = absorbed
+    else:
+        print("  [ABSORB] No hallucinated micro-segments detected", flush=True)
 
     # Pass 2: Prevent Audio Replay (Backward Jumps)
     # If the AD track is missing a scene, DescribeAlign might force a continuous master timeline
