@@ -994,10 +994,11 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                         plot_file)
 
                     samples, sr = dtw_smooth_stitch.load_wav(ad_da_wav)
+                    master_samples, _ = dtw_smooth_stitch.load_wav(ref_da_wav)
                     stitched = dtw_smooth_stitch.smooth_stitch_audio(
                         segments, samples, sr,
                         crossfade_ms=50, vad_search_ms=500, vad_threshold=0.02, silence_ms=200,
-                        debug=debug
+                        debug=debug, master_samples=master_samples
                     )
 
                     raw_stitched_wav = os.path.join(

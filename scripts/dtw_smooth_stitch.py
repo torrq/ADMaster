@@ -418,7 +418,7 @@ def crossfade_stitch(segments_audio, crossfade_samples):
 def smooth_stitch_audio(segments, samples, sr,
                         crossfade_ms=50, vad_search_ms=500,
                         vad_threshold=0.02, silence_ms=200,
-                        debug=False):
+                        debug=False, master_samples=None):
     """
     Full 3-layer smooth stitching pipeline.
 
@@ -537,14 +537,37 @@ def smooth_stitch_audio(segments, samples, sr,
         f"  [ZC] Snapped {zc_count}/{len(snapped)} boundary pairs to zero crossings")
 
     # -- Layer 3: Absolute Timeline Placement & Equal-Power Crossfade --
-    print(f"\n  Layer 3: Absolute Timeline Placement & Crossfade ({crossfade_ms}ms, "
-          f"{xf_samples} samples)")
+    print(
+        f"\n  Layer 3: Absolute Timeline Placement & Crossfade ({crossfade_ms}ms, {xf_samples} samples)",
+        flush=True)
+    
+    in_gap = True
 
     duration_s = max(seg["master_end"] for seg in segments)
     # 10s extra padding just in case
     canvas_len = int(duration_s * sr) + int(sr * 10)
     channels = samples.shape[1] if samples.ndim > 1 else 1
-    canvas = np.zeros((canvas_len, channels), dtype=np.float32)
+    
+    if master_samples is not None:
+        if master_samples.ndim == 1 and channels > 1:
+            master_samples = np.column_stack([master_samples] * channels)
+        elif master_samples.ndim > 1 and channels == 1:
+            master_samples = master_samples[:, 0]
+            
+        if len(master_samples) >= canvas_len:
+            canvas = master_samples[:canvas_len].copy()
+        else:
+            # Pad with silence if master_samples is shorter than canvas_len
+            pad_len = canvas_len - len(master_samples)
+            if channels > 1:
+                padding = np.zeros((pad_len, channels), dtype=np.float32)
+                canvas = np.vstack([master_samples, padding])
+            else:
+                padding = np.zeros(pad_len, dtype=np.float32)
+                canvas = np.concatenate([master_samples, padding])
+        print("  [GAP FILL] Initialized canvas with master audio to naturally fill missing AD scenes.", flush=True)
+    else:
+        canvas = np.zeros((canvas_len, channels), dtype=np.float32)
 
     t = np.linspace(0, 1, xf_samples, dtype=np.float32)
     fade_out = (np.cos(t * np.pi / 2) ** 2)
@@ -624,21 +647,52 @@ def smooth_stitch_audio(segments, samples, sr,
         f_out = fade_out[:,
                          np.newaxis] if audio.ndim == 2 else fade_out.ravel()
 
-        # Apply equal-power crossfades
-        if i > 0 and len(audio) >= xf_samples:
-            audio[:xf_samples] = audio[:xf_samples] * f_in
-        if i < len(snapped) - 1 and len(audio) >= xf_samples:
-            audio[-xf_samples:] = audio[-xf_samples:] * f_out
-
+        # ---------------------------------------------------------------------
+        # Apply equal-power crossfades and manage Master Audio Gap Filling
+        # ---------------------------------------------------------------------
         write_e = min(master_s + len(audio), canvas_len)
         read_e = write_e - master_s
+        if read_e <= 0:
+            continue
+
+        gap_after = True
+        if i < len(snapped) - 1:
+            next_master_s = snapped[i+1][0]
+            if next_master_s <= write_e:
+                gap_after = False
+
+        if len(audio) >= xf_samples:
+            # 1. Start of Segment
+            if in_gap:
+                # Fade OUT the Master Audio underneath the new AD segment
+                canvas[master_s : master_s + xf_samples] *= f_out
+            audio[:xf_samples] = audio[:xf_samples] * f_in
+
+            # 2. Body of Segment
+            # We must ZERO OUT the Master Audio where the AD audio plays solo
+            body_s = master_s + xf_samples
+            body_e = write_e - xf_samples
+            if body_e > body_s:
+                canvas[body_s : body_e] = 0.0
+
+            # 3. End of Segment
+            audio[-xf_samples:] = audio[-xf_samples:] * f_out
+            if gap_after:
+                # Fade IN the Master Audio after the AD segment ends
+                canvas[write_e - xf_samples : write_e] *= f_in
+            else:
+                # The next AD segment will overlap here, so ZERO OUT the Master Audio 
+                # so the Canvas only holds the pure fading AD tail
+                canvas[write_e - xf_samples : write_e] = 0.0
+        else:
+            # For micro-segments, just zero out the Master Audio underneath it completely
+            canvas[master_s : write_e] = 0.0
+
         if debug:
-            print(
-                f"[DEBUG] Seg {i}: master_s={master_s}, write_e={write_e}, audio_len={
-                    len(audio)}, read_e={read_e}",
-                flush=True)
-        if read_e > 0:
-            canvas[master_s:write_e] += audio[:read_e]
+            print(f"[DEBUG] Seg {i+1}: master_s={master_s}, write_e={write_e}, audio_len={len(audio)}, read_e={read_e}", flush=True)
+
+        canvas[master_s:write_e] += audio[:read_e]
+        in_gap = gap_after
 
     exact_samples = int(duration_s * sr)
     return canvas[:exact_samples]
