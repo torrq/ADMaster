@@ -10,7 +10,7 @@ This directory contains the production-ready tools for acoustic audio descriptio
 | :--- | :--- | :---: | :--- | :--- |
 | **[`sync_ad_track.py`](#1-sync_ad_trackpy-master-sync--encoder)** | Universal acoustic alignment & audio encoding | No | MKV, MP4, DTS, AC3, FLAC, MP3, WAV | Aligned `-AD (Stereo).m4a`, `-AD (Night Mode).m4a`, `(Surround).ac3`, `(Stereo).m4a` |
 | **[`batch_orchestrator.py`](#2-batch_orchestratorpy-tv-season-orchestrator)** | Automated heuristic TV series strategy router | Conditional | Directory of MKV episodes + AD tracks | Synced MKVs via Direct Mux, Frame-Perfect Cut, or DTW |
-| **[`dtw_smooth_stitch.py`](#3-dtw_smooth_stitchpy-dtw-transition-smoother)** | 4-layer DTW transition smoother | No | Alignment map + Source AD audio | Stitched, smooth AD audio with VAD + Crossfades |
+| **[`dtw_smooth_stitch.py`](#3-dtw_smooth_stitchpy-dtw-transition-smoother)** | Multilayer DTW transition smoother | No | Alignment map + Source AD audio | Stitched, smooth AD audio with VAD + Crossfades |
 | **[`batch_frameperfect.py`](#4-batch_frameperfectpy-commercial-break-cutter)** | Surgical video/audio commercial gap excision | Yes | MKVs with black commercial gaps | Clean MKV without black gaps, frame-accurate |
 | **[`remove_commercial_breaks.py`](#5-remove_commercial_breakspy-break-detector)** | Dual black & silence gap scanner | No | MKV video files | JSON / formatted slice timestamps |
 | **[`convert_main_tracks.py`](#6-convert_main_trackspy-master-audio-converter)** | Standalone 5.1/7.1 downmixing converter | No | Multi-channel audio / video | Surround AC3, True 2.0 Stereo AAC, Night Mode AAC |
@@ -30,7 +30,7 @@ Master tool for synchronizing external Audio Description tracks to reference med
 * **Batch Queue Processing (`--batch`)**: Iterates through all movie folders in a top-level queue directory sequentially.
 * **100-Anchor FFT Cross-Correlation**: Samples 100 timeline positions via fast FFT in memory (sub-millisecond $\pm 1\text{ms}$ precision, 100% bit-perfect linear passthrough).
 * **Skip Generation Overrides**: Supports --overwrite to force re-render existing outputs, and --no-night to skip loudnorm nighttime encode.
-  * **Forced DTW Fast-Path (`--force-dtw`)**: Bypasses correlation to directly execute DescribeAlign Dynamic Time Warping with 4-layer smoothing for alternate cuts.
+  * **Forced DTW Fast-Path (`--force-dtw`)**: Bypasses correlation to directly execute DescribeAlign Dynamic Time Warping with Multilayer smoothing for alternate cuts.
 * **Dynamic Sample-Rate PAL Clock Math (`--pal` / `--no-pal`)**: Probes input sample rates (44.1k vs 48k) to calculate exact resampling ratios for PAL 25fps slowdowns:
   $$\text{asetrate} = \text{input\_sr} \times \frac{23.976024}{25.0}$$
 * **Strict ITU-R BS.775 2.0 Downmixing**: Enforces standard downmix matrix (`pan=stereo|c0=c0+0.7071*c2+0.7071*c4|c1=c1+0.7071*c2+0.7071*c5`), `-ac 2`, and `-ar 48000`.
@@ -80,12 +80,12 @@ python scripts/batch_orchestrator.py --dry-run
 
 ## 3. `dtw_smooth_stitch.py` (DTW Transition Smoother)
 
-Post-processor for DescribeAlign timestamp maps. Re-stitches AD audio using a transparent **4-layer transition smoothing pipeline**:
+Post-processor for DescribeAlign timestamp maps. Re-stitches AD audio using a transparent **Multilayer transition smoothing pipeline**:
 
-1. **Layer 0 -- Wobble Filtering**: Differentiates between DTW tracking hallucinations (> 0.1% drift) and genuine continuous clock drifts (< 0.1% drift). Rejects hallucinations to force strict 1.0x native playback across structural film splices.
+1. **Layer 0 -- Wobble Filtering & Gap Filling**: Differentiates between DTW tracking hallucinations (> 0.2% drift) and genuine continuous clock drifts (like 24.000 vs 23.976 fps). Rejects hallucinations to force strict 1.0x native playback across structural film splices. Automatically detects deleted scenes and truncates DescribeAlign's fallback audio repetition, inserting perfect silence gaps and crossfading them with the original Master Audio soundtrack to maintain background ambiance.
 2. **Layer 1 -- VAD-Aware Cut Nudging**: Analyzes center/narrator RMS energy around segment boundaries. If a cut point lands mid-speech, the cut is automatically nudged forward or backward to the nearest natural silence gap (+/-500ms search window, 200ms hangover).
 3. **Layer 2 -- Zero-Crossing Snapping**: Micro-adjusts boundaries (+/-2ms) to land on exact waveform zero crossings, eliminating DC offset pop artifacts.
-4. **Layer 3 -- Float64 Resampling & Equal-Power Crossfade**: Automatically applies high-precision loat64 linear interpolation to eliminate continuous timeline drifts without WSOLA artifacts. Blends segment junctions using 50ms constant-power cosine crossfades ($\cos^2 + \sin^2 = 1$).
+4. **Layer 3 -- Float64 Resampling & Equal-Power Crossfade**: Automatically applies high-precision `float64` linear interpolation to eliminate continuous timeline drifts (up to 5.0%, supporting native 4.27% PAL matches) without WSOLA artifacts. Blends segment junctions using 50ms constant-power cosine crossfades ($\cos^2\theta + \sin^2\theta = 1$).
 
 ### Common Commands:
 ```powershell

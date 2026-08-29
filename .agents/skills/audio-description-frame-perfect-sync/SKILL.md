@@ -114,22 +114,22 @@ ffmpeg -y -i "describealign_output.mkv" -map 0:v:0 -map 0:a:1 -map 0:a:0 -c copy
   "final_output.mkv"
 ```
 
-### Limitations & Micro-Drifts Warning
-* **DO NOT use describealign for continuous micro-drift** (e.g. 0.5s drift over 2 hours). DTW is meant for massive structural edits (commercial breaks, missing scenes). If fed a track with continuous framerate drift, DTW will hallucinate jumps due to low acoustic similarity (AD narration vs raw dialogue) and make the sync worse and jerky.
-* **Always use `atempo` for micro-drifts.** If `sync_ad_track.py` detects a tiny stretch factor (e.g. `0.9998x` or `1.00008x`), manually apply it via the `atempo` filter. A 0.00008x stretch equals a 0.5s lip-sync drift over a 2-hour movie, which is highly noticeable.
-* Audio segments stretched >10% introduce audible pitch distortion.
+### Limitations & Troubleshooting
+* **Handling Continuous Framerate Drifts**: Previously, DescribeAlign was not recommended for continuous micro-drifts (e.g. 24.000 vs 23.976 fps) because it would hallucinate jerky jumps. The `dtw_smooth_stitch.py` pipeline now perfectly handles these via **Layer 3.5 Float64 Resampling** and the 0.2% Wobble Filter tolerance. It natively absorbs PAL (4.27%) and Theatrical (0.1001%) drifts flawlessly.
+* **Asetrate Pitch Correction**: While DTW can now natively stretch a 4.27% PAL mismatch to frame-perfect sync using linear interpolation, this does *not* correct the PAL speedup pitch shift. To restore the narrator's natural deeper pitch, rename the AD file to include `UK` or `PAL` so `sync_ad_track.py` pre-processes it with FFmpeg's `asetrate` sample-clock conversion before passing it to DescribeAlign.
 * Slower than simple cross-correlation (full DTW feature computation).
 * Creates `videos_with_ad/` and `alignment_plots/` directories -- run from `scratch/` or clean up after.
 
 ### Transition Smoothing (dtw_smooth_stitch.py)
-DescribeAlign's raw output can slice through narrator speech mid-sentence at segment boundaries. The `dtw_smooth_stitch.py` script fixes this with a **Multilayer transition pipeline** applied after describealign produces its alignment plot:
+DescribeAlign's raw output can slice through narrator speech mid-sentence at segment boundaries, hallucinate rate stretches over musical overtures, and leave absolute silence during deleted scenes. The `dtw_smooth_stitch.py` script fixes this with a **Multilayer transition pipeline** applied after describealign produces its alignment plot:
 
-1. **Layer 1 -- VAD-Aware Cut Nudging**: At each segment boundary, checks RMS energy in 50ms windows. If speech is active at a cut, extends the outgoing boundary forward (or pulls incoming backward) to the nearest silence gap. Parameters: `+/-500ms` search, `200ms` silence hangover, `0.02` RMS threshold.
-2. **Layer 2 -- Zero-Crossing Snapping**: Snaps each cut to the nearest waveform zero crossing within `+/-2ms` to eliminate DC-offset pops.
-3. **Layer 3 -- Equal-Power Crossfade**: 50ms cosine-shaped crossfade at every junction using overlap-add mixing.
+1. **Layer 0 -- Wobble Filtering & Gap Filling**: Differentiates between DTW hallucinations (> 0.2% drift) and genuine continuous clock drifts (e.g., 4.27% PAL, 0.1001% Theatrical). Rejects hallucinations to force strict 1.0x native playback across splices. Detects deleted scenes (missing AD audio) and truncates DescribeAlign's fallback audio repetition to insert clean silence gaps, automatically crossfading them with the original Master Audio soundtrack to maintain background ambiance.
+2. **Layer 1 -- VAD-Aware Cut Nudging**: At each segment boundary, checks RMS energy in 50ms windows. If speech is active at a cut, extends the outgoing boundary forward (or pulls incoming backward) to the nearest silence gap. Parameters: `+/-500ms` search, `200ms` silence hangover, `0.02` RMS threshold.
+3. **Layer 2 -- Zero-Crossing Snapping**: Snaps each cut to the nearest waveform zero crossing within `+/-2ms` to eliminate DC-offset pops.
+4. **Layer 3 -- Float64 Resampling & Equal-Power Crossfade**: Uses high-precision `float64` linear interpolation to eliminate continuous timeline drifts (up to 5.0%, supporting native PAL mismatches seamlessly) without WSOLA artifacts. Blends segment junctions using 50ms constant-power cosine crossfades ($\cos^2\theta + \sin^2\theta = 1$). Includes an airtight sequence clamp.
 
-**Standalone**: `python dtw_smooth_stitch.py alignment.txt AD.mka output.m4a`
-**Integrated**: `batch_orchestrator.py` automatically imports and calls it after describealign runs.
+**Standalone**: `python scripts/dtw_smooth_stitch.py <alignment.txt> <AD.mka> <output.m4a>`
+**Integrated**: `sync_ad_track.py` automatically imports and calls it after describealign runs in `--force-dtw` mode.
 
 ### Integration with batch_orchestrator.py
 `batch_orchestrator.py` automatically selects the right strategy per episode:
@@ -248,6 +248,7 @@ When keyframe snapping deletes footage, extract the missing AD audio chunk, coll
   - If a movie is a 25.0 fps PAL speedup (e.g. PAL broadcast vs NTSC master), the duration ratio will be almost exactly $\frac{23.976024}{25.0} \approx 0.95904$, and every individual scene will run 4.27% faster.
   - If a movie is from a shorter **Theatrical Cut**, the audio within each continuous scene runs at **100% native 1.000000x film speed (23.976 fps)**.
 * **The Rule**: Applying a PAL slowdown (`asetrate=42293.706`) to an AD track that is already running at 1.0x native speed forces the audio to play 4.27% too slow, causing continuous drift across every scene and confusing DTW. Always test local scene correlation before applying tempo/sample-rate conversions. When a track is an alternate cut running at 1.0x speed, decode at native 1.0x rate and use DescribeAlign DTW to bridge the excised/inserted scenes.
+* **The Automated Fix**: If you manually determine a track is a PAL speedup, you can trigger `sync_ad_track.py` to automatically apply the high-quality perfect-pitch `asetrate` slowdown by simply ensuring the string `UK` or `PAL` is included in the `.mp3` filename.
 
 ### 11. MKVPropEdit Track Selector Syntax (`=` for UID vs `@` for Track Number)
 * **The Pitfall**: In `mkvpropedit`, `--edit track:@<val>` interprets `<val>` as a 1-based Track Number (e.g. `@3`). Passing a 19-digit Matroska Track UID with `@` causes `mkvpropedit` command-line parsing errors.

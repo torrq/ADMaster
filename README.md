@@ -4,7 +4,7 @@
 
 **adsync** is a high-performance, automated Python toolkit for synchronizing, downmixing, loudness-normalizing, and packaging Audio Description (AD) and secondary commentary tracks for movies and television series.
 
-It provides sub-millisecond acoustic cross-correlation, dynamic Dynamic Time Warping (DTW) piecewise alignment with 4-layer transition smoothing, frame-accurate black-screen commercial break excision, broadcast-standard ITU-R BS.775 2.0 stereo downmixing, in-place Matroska flag management, and Plex Media Server collection integration.
+It provides sub-millisecond acoustic cross-correlation, dynamic Dynamic Time Warping (DTW) piecewise alignment with Multilayer transition smoothing, frame-accurate black-screen commercial break excision, broadcast-standard ITU-R BS.775 2.0 stereo downmixing, in-place Matroska flag management, and Plex Media Server collection integration.
 
 ---
 
@@ -16,7 +16,7 @@ All scripts are located in [`scripts/`](scripts/) and can be run standalone or c
 | :--- | :--- | :--- |
 | **[`sync_ad_track.py`](scripts/README.md#1-sync_ad_trackpy-master-sync--encoder)** | **Master Movie Sync & Encoder** | Aligning AD tracks to movies, queue batch processing, dynamic PAL conversion, 5.1/2.0 deliverable rendering. |
 | **[`batch_orchestrator.py`](scripts/README.md#2-batch_orchestratorpy-tv-season-orchestrator)** | **TV Season Router** | Processing entire TV seasons with automatic strategy selection (Direct Mux, Frame-Perfect Cut, DTW). |
-| **[`dtw_smooth_stitch.py`](scripts/README.md#3-dtw_smooth_stitchpy-dtw-transition-smoother)** | **4-layer DTW Smoother** | Re-stitching DescribeAlign alignment maps with VAD cut nudging, zero-crossing snapping, and 50ms crossfades. |
+| **[`dtw_smooth_stitch.py`](scripts/README.md#3-dtw_smooth_stitchpy-dtw-transition-smoother)** | **Multilayer DTW Smoother** | Re-stitching DescribeAlign alignment maps with VAD cut nudging, zero-crossing snapping, and 50ms crossfades. |
 | **[`batch_frameperfect.py`](scripts/README.md#4-batch_frameperfectpy-commercial-break-cutter)** | **Commercial Break Cutter** | Surgically cutting black screen commercial gaps from video streams without keyframe snapping. |
 | **[`remove_commercial_breaks.py`](scripts/README.md#5-remove_commercial_breakspy-break-detector)** | **Break Scanner** | Detecting simultaneous video black and audio silence intervals to output exact cut timestamps. |
 | **[`convert_main_tracks.py`](scripts/README.md#6-convert_main_trackspy-master-audio-converter)** | **Master Audio Downmixer** | Extracting and downmixing 5.1/7.1 masters into true 2.0 Stereo (`alimiter`) and Night Mode (`loudnorm`). |
@@ -151,11 +151,13 @@ Non-linear piecewise synchronization in this toolkit is powered by **[DescribeAl
 
 **DescribeAlign** provides a brilliant implementation of acoustic Dynamic Time Warping (DTW) formulated as a linear programming optimization problem (`scipy.optimize.linprog`). It computes optimal warping paths across non-identical timelines, solving the complex problem of aligning audio across alternate cuts (Theatrical vs. Extended), censorship trims, and broadcast commercial breaks.
 
-**adsync** integrates DescribeAlign's alignment engine and feeds its warping vectors directly into our 4-layer post-processing pipeline ([`dtw_smooth_stitch.py`](scripts/README.md#3-dtw_smooth_stitchpy-dtw-transition-smoother)):
-1. **Wobble Filtering (DTW Hallucination Correction)**: Mathematically intercepts DescribeAlign warping vectors and rejects erratic offset drifts/rate changes during musical overtures, credits, or silence gaps. Forces strict 1.0x native playback across structural film splices.
-2. **VAD Cut Nudging**: Evaluates narrator RMS energy ($\pm 500\text{ms}$ search window, 200ms hangover) to snap cut points to natural silence gaps instead of mid-speech.
-3. **Zero-Crossing Phase Snapping**: Micro-adjusts cut boundaries ($\pm 2\text{ms}$) to waveform zero crossings, eliminating DC step discontinuities and pop artifacts.
-4. **Equal-Power Cosine Crossfades**: Blends segment junctions via 50ms constant-power crossfades ($\cos^2\theta + \sin^2\theta = 1$) with bit-perfect native PCM passthrough.
+**adsync** integrates DescribeAlign's alignment engine and feeds its warping vectors directly into our Multilayer post-processing pipeline ([`dtw_smooth_stitch.py`](scripts/README.md#3-dtw_smooth_stitchpy-dtw-transition-smoother)):
+1. **Wobble Filtering (DTW Hallucination Correction)**: Mathematically intercepts DescribeAlign warping vectors and rejects erratic offset drifts/rate changes during musical overtures, credits, or silence gaps. Tolerates up to 0.2% drift to safely preserve legitimate 24.000 vs 23.976 fps theatrical conversions without misidentifying them as hallucinations.
+2. **Master Audio Gap Filling**: Detects deleted scenes (where the AD track is missing audio that the master video has) and mathematically truncates audio repetition to insert a perfect silence gap, automatically crossfading into and filling the void with the original Master Audio soundtrack to maintain a seamless background mix.
+3. **VAD Cut Nudging**: Evaluates narrator RMS energy ($\pm 500\text{ms}$ search window, 200ms hangover) to snap cut points to natural silence gaps instead of mid-speech.
+4. **Zero-Crossing Phase Snapping**: Micro-adjusts cut boundaries ($\pm 2\text{ms}$) to waveform zero crossings, eliminating DC step discontinuities and pop artifacts.
+5. **Linear Interpolation Drift Matching**: Natively absorbs and seamlessly stretches genuine frame-rate drifts up to 5.0% (fully supporting 4.27% PAL mismatches automatically) without inserting gaps, overlaps, or WSOLA artifacts.
+6. **Equal-Power Cosine Crossfades**: Blends segment junctions via 50ms constant-power crossfades ($\cos^2\theta + \sin^2\theta = 1$) with bit-perfect native PCM passthrough on stable segments.
 
 Upstream project: **[https://github.com/julbean/describealign](https://github.com/julbean/describealign)**
 
