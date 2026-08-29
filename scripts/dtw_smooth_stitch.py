@@ -451,14 +451,14 @@ def smooth_stitch_audio(segments, samples, sr,
         seg["implied_rate"] = implied_rate
 
         if abs(target_offset - current_offset) > 0.05:
-            if abs(1.0 - implied_rate) > 0.001 and audio_dur > 2.0 and master_dur > 2.0:
-                print(
-                    f"  [WOBBLE DETECTED] Seg {
-                        i +
-                        1}: Ignoring offset shift to {
-                        target_offset:+.3f}s, maintaining {
-                        current_offset:+.3f}s",
-                    flush=True)
+            is_wobble = False
+            if abs(1.0 - implied_rate) > 0.05:
+                is_wobble = True
+            elif abs(1.0 - implied_rate) > 0.001 and master_dur < 300.0:
+                is_wobble = True
+
+            if is_wobble:
+                print(f"  [WOBBLE DETECTED] Seg {i+1}: Ignoring offset shift to {target_offset:+.3f}s, maintaining {current_offset:+.3f}s", flush=True)
                 # It's a hallucination. Force 1.0x native playback.
                 seg["implied_rate"] = 1.0
             else:
