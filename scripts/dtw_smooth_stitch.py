@@ -599,11 +599,11 @@ def smooth_stitch_audio(segments, samples, sr,
         # Layer 3.5 requires the original implied_rate from Layer 0 before VAD nudging/Wobble correction altered it
         implied_rate = seg.get("implied_rate", 1.0)
 
-        # Layer 3.5: If the rate drift is genuine but tiny (< 0.1%), seamlessly
+        # Layer 3.5: If the rate drift is genuine but tiny (< 5.0%), seamlessly
         # stretch the audio segment using linear interpolation to perfectly fill
         # the master duration. This completely prevents continuous timeline drift
-        # without inserting gaps, overlaps, or WSOLA artifacts.
-        if 0.000001 < abs(1.0 - implied_rate) <= 0.001 and len(audio) > 0:
+        # without inserting gaps, overlaps, or WSOLA artifacts. Supports PAL mismatches (4.27%).
+        if 0.000001 < abs(1.0 - implied_rate) <= 0.05 and len(audio) > 0:
             target_len = int(len(audio) / implied_rate)
             print(f"  [STRETCH] Resampling Seg {i+1} by {1.0/implied_rate:.5f}x to perfectly correct {abs(1.0 - implied_rate)*100:.3f}% timeline drift", flush=True)
             
