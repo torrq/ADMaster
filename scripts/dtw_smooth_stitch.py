@@ -120,16 +120,78 @@ def parse_alignment_plot(plot_file):
                     "audio_end": time_to_sec(m2.group(2)),
                 })
 
+    # Merge through micro-glitches: when a tiny hallucinated segment sits
+    # between two real segments, removing it creates a hard cut at a bad spot.
+    # Instead, extend the previous real segment's master_end/audio_end to bridge
+    # the gap, eliminating the phantom boundary entirely.
     cleaned = []
     for s in segments:
         dur_master = s["master_end"] - s["master_start"]
-        # Filter out extreme micro-glitches (e.g. 7407% rate jump over 0.07
-        # seconds)
-        if dur_master < 0.25 and abs(s["rate_pct"]) > 50.0:
-            continue
-        cleaned.append(s)
+        is_glitch = dur_master < 0.5 and abs(s["rate_pct"]) > 10.0
 
-    return cleaned if cleaned else segments
+        if is_glitch and len(cleaned) > 0:
+            # Bridge: extend previous segment to cover this glitch
+            prev = cleaned[-1]
+            prev["master_end"] = s["master_end"]
+            prev["audio_end"] = s["audio_end"]
+        else:
+            cleaned.append(s)
+
+    if not cleaned:
+        cleaned = segments
+
+    # --- Plateau Consolidation ---
+    # Group jittery DTW segments that share the same baseline offset (within 120ms)
+    # into unified structural reels/scenes. This prevents DescribeAlign's 100ms
+    # quantization bins from chopping unbroken dialogue into dozens of micro-cuts.
+    plateaus = []
+    if cleaned:
+        current_plateau = [cleaned[0]]
+        current_plateau_offset = cleaned[0]["master_start"] - cleaned[0]["audio_start"]
+
+        for i in range(1, len(cleaned)):
+            s = cleaned[i]
+            seg_offset = s["master_start"] - s["audio_start"]
+            delta = abs(seg_offset - current_plateau_offset)
+
+            if delta < 0.120:
+                current_plateau.append(s)
+            else:
+                # Real structural edit or reel change (>120ms shift)
+                p_m_start = current_plateau[0]["master_start"]
+                p_m_end = current_plateau[-1]["master_end"]
+                p_a_start = current_plateau[0]["audio_start"]
+                p_a_end = current_plateau[-1]["audio_end"]
+                m_dur = p_m_end - p_m_start
+                a_dur = p_a_end - p_a_start
+                rate = a_dur / m_dur if m_dur > 0 else 1.0
+                plateaus.append({
+                    "master_start": p_m_start,
+                    "master_end": p_m_end,
+                    "audio_start": p_a_start,
+                    "audio_end": p_a_end,
+                    "rate_pct": (rate - 1.0) * 100.0,
+                })
+                current_plateau = [s]
+                current_plateau_offset = seg_offset
+
+        if current_plateau:
+            p_m_start = current_plateau[0]["master_start"]
+            p_m_end = current_plateau[-1]["master_end"]
+            p_a_start = current_plateau[0]["audio_start"]
+            p_a_end = current_plateau[-1]["audio_end"]
+            m_dur = p_m_end - p_m_start
+            a_dur = p_a_end - p_a_start
+            rate = a_dur / m_dur if m_dur > 0 else 1.0
+            plateaus.append({
+                "master_start": p_m_start,
+                "master_end": p_m_end,
+                "audio_start": p_a_start,
+                "audio_end": p_a_end,
+                "rate_pct": (rate - 1.0) * 100.0,
+            })
+
+    return plateaus if plateaus else cleaned
 
 
 # --- Audio I/O ----------------------------------------------------------
