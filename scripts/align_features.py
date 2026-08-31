@@ -24,6 +24,32 @@ BAND_EDGES = (250.0, 1200.0)
 BAND_WEIGHTS = (0.4, 0.2, 0.4)  # low (<250Hz), mid (speech 250-1200Hz), high (>1200Hz)
 
 
+def resolve_adsync():
+    """Ensure adsync package is discoverable on sys.path."""
+    try:
+        import adsync
+        return
+    except ImportError:
+        pass
+
+    candidates = [
+        r"C:\Users\nathan\Projects\git\ADSync\src",
+        r"C:\Users\nathan\Projects\git\ADSync",
+        r"F:\uploads\ADSync\src",
+        r"F:\uploads\ADSync",
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            abs_c = os.path.abspath(c)
+            if abs_c not in sys.path:
+                sys.path.insert(0, abs_c)
+            try:
+                import adsync
+                return
+            except ImportError:
+                continue
+
+
 def create_band_filters(sr: int) -> Tuple[NDArray, NDArray]:
     """Create SOS Butterworth lowpass filters for the band edges."""
     nyq = sr / 2.0
@@ -131,6 +157,7 @@ def detect_speed_pal(
         (is_pal, stretch_factor, confidence)
     """
     try:
+        resolve_adsync()
         from adsync.align.fingerprint import fingerprint_align
         from adsync.align.speed import detect_speed
 

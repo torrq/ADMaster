@@ -133,6 +133,60 @@ def find_describealign(cfg=None):
     return None
 
 
+def resolve_adsync(cfg=None):
+    """Resolve and import adsync package from config path, sibling repos, or environment."""
+    cfg = cfg or CONFIG
+    custom_path = cfg.get("adsync_path")
+    candidates = []
+    if custom_path:
+        candidates.extend([custom_path, os.path.join(custom_path, "src")])
+
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates.extend([
+        os.path.join(base_dir, "..", "ADSync", "src"),
+        os.path.join(base_dir, "..", "ADSync"),
+        r"C:\Users\nathan\Projects\git\ADSync\src",
+        r"C:\Users\nathan\Projects\git\ADSync",
+        r"F:\uploads\ADSync\src",
+        r"F:\uploads\ADSync",
+    ])
+    for c in candidates:
+        if c and os.path.exists(c) and os.path.isdir(c):
+            abs_c = os.path.abspath(c)
+            if abs_c not in sys.path:
+                sys.path.insert(0, abs_c)
+            try:
+                import adsync
+                return abs_c
+            except ImportError:
+                continue
+    return None
+
+
+def locate_mkvtoolnix(tool_name="mkvmerge", cfg=None):
+    """Locate MKVToolNix binary (mkvmerge, mkvpropedit, mkvextract) from config, local bin, or PATH."""
+    cfg = cfg or CONFIG
+    custom = cfg.get(f"{tool_name}_path")
+    if custom and os.path.exists(custom):
+        return os.path.abspath(custom)
+
+    exe_name = f"{tool_name}.exe" if os.name == 'nt' else tool_name
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates = [
+        os.path.join(base_dir, "bin", exe_name),
+        os.path.join(r"C:\Program Files\MKVToolNix", exe_name),
+        os.path.join(r"C:\Program Files (x86)\MKVToolNix", exe_name),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return os.path.abspath(c)
+
+    which = shutil.which(tool_name) or shutil.which(exe_name)
+    if which:
+        return which
+    return exe_name
+
+
 def locate_binaries(ffmpeg_path):
     """Ensure ffmpeg and ffprobe binaries are located and executable."""
     custom_ffprobe = CONFIG.get("ffprobe_path")

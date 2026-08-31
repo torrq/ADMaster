@@ -4,8 +4,54 @@ import re
 import argparse
 from datetime import timedelta
 
-FFMPEG_PATH = r"bin\ffmpeg.exe"
-MKVMERGE_PATH = r"C:\Program Files\MKVToolNix\mkvmerge.exe"
+import json
+import os
+import shutil
+
+
+def load_config():
+    """Loads configuration from config.local.json, config.json, or config.default.json."""
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates = [
+        os.path.join(base_dir, "config.local.json"),
+        os.path.join(base_dir, "config.json"),
+        os.path.join(base_dir, "config.default.json")
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            try:
+                with open(c, "r", encoding="utf-8") as f:
+                    content = f.read()
+                    content_clean = re.sub(r'//.*', '', content)
+                    content_clean = re.sub(r'/\*.*?\*/', '', content_clean, flags=re.DOTALL)
+                    return json.loads(content_clean)
+            except Exception:
+                pass
+    return {}
+
+
+CONFIG = load_config()
+
+
+def locate_tool(name):
+    custom = CONFIG.get(f"{name}_path")
+    if custom and os.path.exists(custom):
+        return os.path.abspath(custom)
+    exe = f"{name}.exe" if os.name == "nt" else name
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates = [
+        os.path.join(base_dir, "bin", exe),
+        os.path.join(r"C:\Program Files\MKVToolNix", exe),
+        os.path.join(r"C:\Program Files (x86)\MKVToolNix", exe),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return os.path.abspath(c)
+    return shutil.which(name) or shutil.which(exe) or exe
+
+
+FFMPEG_PATH = locate_tool("ffmpeg")
+MKVMERGE_PATH = locate_tool("mkvmerge")
 
 
 def format_time(seconds):

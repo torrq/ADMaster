@@ -14,9 +14,28 @@
   // Leave empty ("") to automatically discover alongside FFmpeg or in system PATH.
   "ffprobe_path": "",
 
-  // Path to describealign.py script for Dynamic Time Warping (DTW) piecewise alignment.
+  // Path to MKVToolNix mkvmerge executable.
+  // Leave empty ("") to auto-discover in ./bin/, Program Files, or system PATH.
+  "mkvmerge_path": "",
+
+  // Path to MKVToolNix mkvpropedit executable.
+  // Leave empty ("") to auto-discover in ./bin/, Program Files, or system PATH.
+  "mkvpropedit_path": "",
+
+  // Path to MKVToolNix mkvextract executable.
+  // Leave empty ("") to auto-discover in ./bin/, Program Files, or system PATH.
+  "mkvextract_path": "",
+
+  // Path to ADSync repository root or source package.
+  // Leave empty ("") to auto-discover in sibling directories or Python environment.
+  "adsync_path": "",
+
+  // Path to describealign.py script for legacy DTW alignment.
   // Leave empty ("") to automatically resolve from sibling directories or PATH.
   "describealign_path": "",
+
+  // Default non-linear warp engine for complex edits: "adsync" (default) or "describealign".
+  "default_warp_engine": "adsync",
 
   // Default number of CPU threads allocated for FFmpeg encoding operations (Default: 2).
   "default_threads": 2,
@@ -30,10 +49,16 @@
   // Default number of correlation analysis anchors sampled across the timeline (Default: 100).
   "default_anchors": 100,
 
+  // Whether to enable 3-band speech suppression during acoustic alignment (Default: true).
+  "default_multiband": true,
+
+  // Whether to enable automatic acoustic PAL speed probing (Default: true).
+  "default_speed_detect": true,
+
   // Whether to overwrite existing deliverables in the output directory (Default: false).
   // When false, existing output files are preserved and re-renders are skipped.
   "default_overwrite": false,
 
-  // Enable verbose debug logging (useful for troubleshooting DTW mapping and cut points)
+  // Enable verbose debug logging (useful for troubleshooting warp mapping and cut points)
   "debug_mode": false
 }
