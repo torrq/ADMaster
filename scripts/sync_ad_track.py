@@ -4,7 +4,7 @@ r"""
 ================================================================================
 Universal Audio Description (AD) & Main Audio Sync & Encoding Pipeline
 ================================================================================
-Repository: adsync
+Repository: admaster
 License: MIT
 
 Overview:
