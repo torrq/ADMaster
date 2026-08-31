@@ -36,6 +36,7 @@ Usage Examples:
 import argparse
 import glob
 import json
+import logging
 import os
 import re
 import shutil
@@ -43,6 +44,9 @@ import subprocess
 import sys
 import wave
 import numpy as np
+
+# Mute noisy internal ADSync fingerprint/drift tracing unless --debug is passed
+logging.getLogger("adsync").setLevel(logging.ERROR)
 
 try:
     from scipy.signal import fftconvolve
@@ -2100,6 +2104,11 @@ normalization, and MKV sample multiplexing.
     args = parser.parse_args()
     args.debug = args.debug or CONFIG.get("debug_mode", False)
     
+    if args.debug:
+        logging.getLogger("adsync").setLevel(logging.DEBUG)
+    else:
+        logging.getLogger("adsync").setLevel(logging.ERROR)
+
     ffmpeg_bin, ffprobe_bin = locate_binaries(args.ffmpeg)
 
     target_dir = args.dir_opt or args.movie_dir
