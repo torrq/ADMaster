@@ -91,50 +91,31 @@ python scripts/sync_ad_track.py "F:\uploads\queue\<MovieName>" --preview 180
 
 ---
 
-## Workflow 2: DescribeAlign DTW Piecewise Alignment (Complex Edits)
+## Workflow 2: Non-Linear Alignment & Alternate Cuts
 
-**When to use**: AD and reference have **different edits** -- commercial breaks removed, scenes cut/added, or network vs bluray cuts. Cross-correlation fails because no single offset works across the timeline.
+When AD and reference have **different edits** (commercial breaks removed, scenes cut/added, Theatrical vs Extended, or differing transfer speeds), linear cross-correlation fails. `admaster` provides two non-linear engines:
 
-**Location**: `describealign.py` (external tool, resolved from PATH or project config)
+### Workflow 2A: ADSync Viterbi DP + PCHIP Warp (Primary / Default)
+* **When**: Default non-linear engine used when `--force-dtw` is passed or correlation confidence is low.
+* **Mechanism**: Candidate lattice generation + Viterbi dynamic programming + continuous monotone PCHIP cubic spline warping + WSOLA pitch-preserved time-stretching.
+* **Key Benefits**: Preserves 100% continuous waveform flow without cutting audio into discrete blocks, eliminating mid-speech cuts, clicks, and mangled syllables. Completes alignment in ~15–30s.
+* **Command**:
+  ```powershell
+  python scripts/sync_ad_track.py "F:\uploads\queue\<MovieFolder>" --force-dtw --overwrite
+  ```
 
-### Command
-```powershell
-python describealign.py --yes --stretch_audio <master_video_or_audio> <ad_track>
-```
-
-* `--stretch_audio`: Stretches/compresses the AD to match the master timeline. Keeps original video audio tracks; adds AD as first audio track.
-* `--yes`: **Required for automation.** Skips interactive confirmation prompt that stalls unattended scripts.
-
-### Output
-* `videos_with_ad/ad_<filename>` -- MKV/audio with aligned AD track.
-* `alignment_plots/<filename>.txt` -- Piecewise alignment map showing offsets, rate changes, and timestamp mappings per segment.
-* `alignment_plots/<filename>.png` -- Visual alignment curve plot.
-
-### Track Order Gotcha
-DescribeAlign outputs AD as `a:0` and Main as `a:1` -- the **reverse** of our standard. Always remux to swap:
-```powershell
-ffmpeg -y -i "describealign_output.mkv" -map 0:v:0 -map 0:a:1 -map 0:a:0 -c copy ^
-  -metadata:s:a:0 title="Main, Stereo" -disposition:a:0 default ^
-  -metadata:s:a:1 title="AD, Stereo" -disposition:a:1 visual_impaired ^
-  "final_output.mkv"
-```
-
-### Limitations & Troubleshooting
-* **Handling Continuous Framerate Drifts**: Previously, DescribeAlign was not recommended for continuous micro-drifts (e.g. 24.000 vs 23.976 fps) because it would hallucinate jerky jumps. The `dtw_smooth_stitch.py` pipeline now perfectly handles these via **Layer 3.5 Float64 Resampling** and the 0.2% Wobble Filter tolerance. It natively absorbs PAL (4.27%) and Theatrical (0.1001%) drifts flawlessly.
-* **Asetrate Pitch Correction**: While DTW can now natively stretch a 4.27% PAL mismatch to frame-perfect sync using linear interpolation, this does *not* correct the PAL speedup pitch shift. To restore the narrator's natural deeper pitch, rename the AD file to include `UK` or `PAL` so `sync_ad_track.py` pre-processes it with FFmpeg's `asetrate` sample-clock conversion before passing it to DescribeAlign.
-* Slower than simple cross-correlation (full DTW feature computation).
-* Creates `videos_with_ad/` and `alignment_plots/` directories -- run from `scratch/` or clean up after.
-
-### Transition Smoothing (dtw_smooth_stitch.py)
-DescribeAlign's raw output can slice through narrator speech mid-sentence at segment boundaries, hallucinate rate stretches over musical overtures, and leave absolute silence during deleted scenes. The `dtw_smooth_stitch.py` script fixes this with a **Multilayer transition pipeline** applied after describealign produces its alignment plot:
-
-1. **Layer 0 -- Plateau Consolidation, Wobble Filtering & Gap Filling**: Automatically groups jittery DTW micro-segments sharing the same baseline offset ($\le 120\text{ms}$) into continuous structural blocks/reels, eliminating over 85% of phantom cuts. Differentiates between DTW hallucinations (> 0.2% drift) and genuine continuous clock drifts (e.g., 4.27% PAL, 0.1001% Theatrical). Rejects hallucinations to force strict 1.0x native playback across splices. Detects deleted scenes (missing AD audio) and truncates DescribeAlign's fallback audio repetition to insert clean silence gaps, automatically crossfading them with the original Master Audio soundtrack to maintain background ambiance.
-2. **Layer 1 -- VAD-Aware Cut Nudging**: At each segment boundary, checks RMS energy in 50ms windows. If speech is active at a cut, extends the outgoing boundary forward (or pulls incoming backward) to the nearest silence gap. Parameters: `+/-500ms` search, `200ms` silence hangover, `0.02` RMS threshold.
-3. **Layer 2 -- Zero-Crossing Snapping**: Snaps each cut to the nearest waveform zero crossing within `+/-2ms` to eliminate DC-offset pops.
-4. **Layer 3 -- Float64 Resampling & Equal-Power Crossfade**: Uses high-precision `float64` linear interpolation to eliminate continuous timeline drifts (up to 5.0%, supporting native PAL mismatches seamlessly) without WSOLA artifacts. Blends segment junctions using 50ms constant-power cosine crossfades ($\cos^2\theta + \sin^2\theta = 1$). Includes an airtight sequence clamp.
-
-**Standalone**: `python scripts/dtw_smooth_stitch.py <alignment.txt> <AD.mka> <output.m4a>`
-**Integrated**: `sync_ad_track.py` automatically imports and calls it after describealign runs in `--force-dtw` mode.
+### Workflow 2B: DescribeAlign DTW + Multilayer Smoother (Legacy Option)
+* **When**: Explicitly selected via `--warp-engine describealign`.
+* **Mechanism**: Linear programming DTW (`scipy.optimize.linprog`) generating piecewise timestamp plots + `dtw_smooth_stitch.py` Multilayer transition smoothing.
+* **Command**:
+  ```powershell
+  python scripts/sync_ad_track.py "F:\uploads\queue\<MovieFolder>" --force-dtw --warp-engine describealign --overwrite
+  ```
+* **Multilayer Smoothing Pipeline (`dtw_smooth_stitch.py`)**:
+  1. **Layer 0 -- Plateau Consolidation, Wobble Filtering & Gap Filling**: Groups jittery DTW micro-segments sharing the same baseline offset ($\le 120\text{ms}$) into continuous structural blocks, eliminating over 85% of phantom cuts. Truncates audio repetition during deleted scenes, crossfading them seamlessly with volume-matched Master Audio.
+  2. **Layer 1 -- VAD-Aware Cut Nudging**: Snaps cut points to natural silence gaps ($\pm 500\text{ms}$ search, 200ms hangover) instead of mid-speech.
+  3. **Layer 2 -- Zero-Crossing Snapping**: Snaps cut points to waveform zero crossings ($\pm 2\text{ms}$) to eliminate DC-offset pops.
+  4. **Layer 3 -- Float64 Resampling & Equal-Power Crossfade**: Blends segment junctions using 50ms constant-power cosine crossfades ($\cos^2\theta + \sin^2\theta = 1$).
 
 ### Integration with batch_orchestrator.py
 `batch_orchestrator.py` automatically selects the right strategy per episode:

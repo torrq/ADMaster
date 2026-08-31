@@ -45,9 +45,15 @@ For encoding specs, FFmpeg rules, and detailed workflow instructions, see the **
   * **Main Audio (`--convert-main`)**: Probes channels and outputs `(Surround).ac3` (5.1 640k), `(Stereo).m4a` (true 2.0 downmix + `alimiter`), and `(Night Mode).m4a` (true 2.0 downmix + `loudnorm`).
 * **Preview Mode (`--preview [sec]`)**: Fast test-listening with optional MKV video muxing (`-m`).
 
-### describealign (Fallback -- Dynamic Time Warping)
-* **When**: Cross-correlation fails due to different edits (commercial cuts, scene additions, network vs bluray).
-* **How**: DTW + linear programming (`scipy.optimize.linprog`) builds piecewise alignment map.
+### ADSync (Primary -- Non-Linear Time Warping)
+* **When**: Cross-correlation detects alternate cuts, structural trims, or drifting frame rates.
+* **How**: Acoustic landmark fingerprinting + 3-band speech suppression + Viterbi candidate lattice DP + Monotone PCHIP Cubic Spline Warping + WSOLA rendering.
+* **Key Benefits**: Preserves continuous audio playback without slicing into discrete segments, eliminating splice pops, stuttering, and mangled syllables. Completes alignment in ~15-30s.
+* **Automatic Speed Probing**: Constellation hashes probe 25/24 speed differences in ~2 seconds.
+
+### describealign (Legacy Fallback -- Dynamic Time Warping)
+* **When**: Used when `--warp-engine describealign` is specified or for secondary DTW plot generation.
+* **How**: DTW + linear programming (`scipy.optimize.linprog`) generates piecewise alignment plot + `dtw_smooth_stitch.py` applies Plateau Consolidation, Master Audio Gap Fill, VAD cut nudging, zero-crossing snapping, and 50ms crossfading.
 * **Command**: `python describealign.py --yes --stretch_audio <master> <ad_track>`
 * **Outputs**: `videos_with_ad/ad_<filename>` (aligned MKV), `alignment_plots/<filename>.txt` (timestamp map).
 * **Track order gotcha**: Outputs AD as `a:0`, Main as `a:1` -- reverse of our standard. Always remux to swap.

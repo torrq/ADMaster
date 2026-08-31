@@ -143,22 +143,27 @@ To configure custom binary paths, encoding threads, or loudness targets:
 
 ---
 
-## Upstream Attribution & Technology
+## Upstream Attribution & Alignment Engines
 
-Non-linear piecewise synchronization in this toolkit is powered by **[DescribeAlign](https://github.com/julbean/describealign)**.
+Non-linear audio alignment in **admaster** is powered by two complementary open-source engines:
 
-**DescribeAlign** provides a brilliant implementation of acoustic Dynamic Time Warping (DTW) formulated as a linear programming optimization problem (`scipy.optimize.linprog`). It computes optimal warping paths across non-identical timelines, solving the complex problem of aligning audio across alternate cuts (Theatrical vs. Extended), censorship trims, and broadcast commercial breaks.
+### 1. Primary Engine: [ADSync](https://github.com/JohnnyTheCoder1/ADSync) (Default)
+By **JohnnyTheCoder1**. **ADSync** provides state-of-the-art acoustic landmark fingerprinting, 3-band narration speech suppression, and dynamic programming on candidate lattices:
+* **Continuous Monotone PCHIP Cubic Spline Warping**: Maps timestamps smoothly without cutting audio into discrete blocks, eliminating splice glitch transients and clipped syllables.
+* **WSOLA Time-Stretching**: Preserves audio pitch and timbre across complex reel speed differences.
+* **Automatic Acoustic PAL / Speed Probing**: Identifies 25fps vs 23.976fps transfers in ~2 seconds using constellation hashes.
+* **Execution Speed**: High-performance alignment and rendering in **~15–30 seconds**.
 
-**admaster** integrates DescribeAlign's alignment engine and feeds its warping vectors directly into our Multilayer post-processing pipeline ([`dtw_smooth_stitch.py`](scripts/README.md#4-dtw_smooth_stitchpy-dtw-transition-smoother)):
-1. **Plateau Consolidation**: Groups jittery DTW micro-segments sharing the same baseline offset ($\le 120\text{ms}$) into unified structural blocks/reels. Eliminates over 85% of phantom cuts caused by DTW quantization noise, preserving unbroken bit-perfect playback across continuous scenes.
-2. **Wobble Filtering (DTW Hallucination Correction)**: Mathematically intercepts DescribeAlign warping vectors and rejects erratic offset drifts/rate changes during musical overtures, credits, or silence gaps. Tolerates up to 0.2% drift to safely preserve legitimate 24.000 vs 23.976 fps theatrical conversions without misidentifying them as hallucinations.
-3. **Master Audio Gap Filling**: Detects deleted scenes (where the AD track is missing audio that the master video has) and mathematically truncates audio repetition to insert a perfect silence gap, automatically crossfading into and filling the void with the original Master Audio soundtrack to maintain a seamless background mix.
-4. **VAD Cut Nudging**: Evaluates narrator RMS energy ($\pm 500\text{ms}$ search window, 200ms hangover) to snap cut points to natural silence gaps instead of mid-speech.
-5. **Zero-Crossing Phase Snapping**: Micro-adjusts cut boundaries ($\pm 2\text{ms}$) to waveform zero crossings, eliminating DC step discontinuities and pop artifacts.
-6. **Linear Interpolation Drift Matching**: Natively absorbs and seamlessly stretches genuine frame-rate drifts up to 5.0% (fully supporting 4.27% PAL mismatches automatically) without inserting gaps, overlaps, or WSOLA artifacts.
-7. **Equal-Power Cosine Crossfades**: Blends segment junctions via 50ms constant-power crossfades ($\cos^2\theta + \sin^2\theta = 1$) with bit-perfect native PCM passthrough on stable segments.
+### 2. Secondary Engine: [DescribeAlign](https://github.com/julbean/describealign) (Legacy Option)
+By **julbean**. **DescribeAlign** formulates acoustic Dynamic Time Warping (DTW) as a linear programming optimization problem (`scipy.optimize.linprog`). 
 
-Upstream project: **[https://github.com/julbean/describealign](https://github.com/julbean/describealign)**
+**admaster** feeds DescribeAlign warping vectors into our custom Multilayer post-processing pipeline ([`dtw_smooth_stitch.py`](scripts/README.md#4-dtw_smooth_stitchpy-dtw-transition-smoother)):
+1. **Plateau Consolidation**: Groups jittery DTW micro-segments sharing the same baseline offset ($\le 120\text{ms}$) into unified structural blocks, eliminating over 85% of phantom cuts.
+2. **Wobble Filtering (DTW Hallucination Correction)**: Rejects erratic offset drifts during musical overtures and silence gaps.
+3. **Master Audio Gap Filling**: Detects deleted scenes (timeline voids) in the AD track and smoothly blends volume-matched Blu-ray master audio across the void.
+4. **VAD Cut Nudging**: Evaluates narrator RMS energy ($\pm 500\text{ms}$ search window, 200ms hangover) to snap cut points to natural speech pauses.
+5. **Zero-Crossing Phase Snapping**: Micro-adjusts cut boundaries ($\pm 2\text{ms}$) to waveform zero crossings, eliminating DC pops.
+6. **Equal-Power Cosine Crossfades**: Blends segment junctions via 50ms constant-power crossfades ($\cos^2\theta + \sin^2\theta = 1$).
 
 ---
 
