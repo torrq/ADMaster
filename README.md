@@ -1,8 +1,8 @@
-<img width="1672" height="500" alt="admaster" src="https://github.com/user-attachments/assets/f2a5f098-cf73-432d-a949-f856c72426cb" />
+<img width="1672" height="500" alt="ADMaster" src="https://github.com/user-attachments/assets/f2a5f098-cf73-432d-a949-f856c72426cb" />
 
-# admaster -- Universal Audio Description & Secondary Audio Sync Toolkit
+# ADMaster -- Universal Audio Description & Secondary Audio Sync Toolkit
 
-**admaster** is a high-performance, automated Python toolkit for synchronizing, downmixing, loudness-normalizing, and packaging Audio Description (AD) and secondary commentary tracks for movies and television series.
+**ADMaster** is a high-performance, automated Python toolkit for synchronizing, downmixing, loudness-normalizing, and packaging Audio Description (AD) and secondary commentary tracks for movies and television series.
 
 It provides sub-millisecond acoustic cross-correlation, dynamic Dynamic Time Warping (DTW) piecewise alignment with Multilayer transition smoothing, frame-accurate black-screen commercial break excision, broadcast-standard ITU-R BS.775 2.0 stereo downmixing, in-place Matroska flag management, and Plex Media Server collection integration.
 
@@ -147,7 +147,7 @@ To configure custom binary paths, encoding threads, or loudness targets:
 
 ## Upstream Attribution & Alignment Engines
 
-Non-linear audio alignment in **admaster** is powered by two complementary open-source engines:
+Non-linear audio alignment in **ADMaster** is powered by two complementary open-source engines:
 
 ### 1. Primary Engine: [ADSync](https://github.com/JohnnyTheCoder1/ADSync) (Default)
 By **JohnnyTheCoder1**. **ADSync** provides state-of-the-art acoustic landmark fingerprinting, 3-band narration speech suppression, and dynamic programming on candidate lattices:
@@ -159,7 +159,7 @@ By **JohnnyTheCoder1**. **ADSync** provides state-of-the-art acoustic landmark f
 ### 2. Secondary Engine: [DescribeAlign](https://github.com/julbean/describealign) (Legacy Option)
 By **julbean**. **DescribeAlign** formulates acoustic Dynamic Time Warping (DTW) as a linear programming optimization problem (`scipy.optimize.linprog`). 
 
-**admaster** feeds DescribeAlign warping vectors into our custom Multilayer post-processing pipeline ([`dtw_smooth_stitch.py`](scripts/README.md#4-dtw_smooth_stitchpy-dtw-transition-smoother)):
+**ADMaster** feeds DescribeAlign warping vectors into our custom Multilayer post-processing pipeline ([`dtw_smooth_stitch.py`](scripts/README.md#4-dtw_smooth_stitchpy-dtw-transition-smoother)):
 1. **Plateau Consolidation**: Groups jittery DTW micro-segments sharing the same baseline offset ($\le 120\text{ms}$) into unified structural blocks, eliminating over 85% of phantom cuts.
 2. **Wobble Filtering (DTW Hallucination Correction)**: Rejects erratic offset drifts during musical overtures and silence gaps.
 3. **Master Audio Gap Filling**: Detects deleted scenes (timeline voids) in the AD track and smoothly blends volume-matched Blu-ray master audio across the void.

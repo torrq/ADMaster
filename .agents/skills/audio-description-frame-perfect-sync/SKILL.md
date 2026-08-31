@@ -93,7 +93,7 @@ python scripts/sync_ad_track.py "F:\uploads\queue\<MovieName>" --preview 180
 
 ## Workflow 2: Non-Linear Alignment & Alternate Cuts
 
-When AD and reference have **different edits** (commercial breaks removed, scenes cut/added, Theatrical vs Extended, or differing transfer speeds), linear cross-correlation fails. `admaster` provides two non-linear engines:
+When AD and reference have **different edits** (commercial breaks removed, scenes cut/added, Theatrical vs Extended, or differing transfer speeds), linear cross-correlation fails. `ADMaster` provides two non-linear engines:
 
 ### Workflow 2A: ADSync Viterbi DP + PCHIP Warp (Primary / Default)
 * **When**: Default non-linear engine used when `--force-dtw` is passed or correlation confidence is low.

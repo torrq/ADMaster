@@ -1,4 +1,4 @@
-# admaster Pipeline Scripts
+# ADMaster Pipeline Scripts
 
 This directory contains the production-ready tools for acoustic audio description synchronization, video stream commercial break excision, multi-channel surround downmixing, MKV metadata manipulation, and media server automation.
 

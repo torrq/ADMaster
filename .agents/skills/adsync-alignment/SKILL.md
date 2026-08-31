@@ -71,9 +71,9 @@ This allows full 64-bit RF64 decoding of multi-hour features (e.g., 728,691,230 
 
 ---
 
-## 5. Integration in `admaster`
+## 5. Integration in `ADMaster`
 
-In `admaster`, `sync_ad_track.py` invokes ADSync as the default warp engine:
+In `ADMaster`, `sync_ad_track.py` invokes ADSync as the default warp engine:
 ```powershell
 # Default non-linear warp:
 python scripts/sync_ad_track.py "F:\uploads\queue\<MovieFolder>" --overwrite

@@ -4,7 +4,7 @@ r"""
 ================================================================================
 Universal Audio Description (AD) & Main Audio Sync & Encoding Pipeline
 ================================================================================
-Repository: admaster
+Repository: ADMaster
 License: MIT
 
 Overview:
@@ -1616,7 +1616,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="""
 ================================================================================
-admaster -- Universal Audio Description & Secondary Audio Sync & Encoding Tool
+ADMaster -- Universal Audio Description & Secondary Audio Sync & Encoding Tool
 ================================================================================
 Acoustic cross-correlation, Multiband narration suppression, Automatic PAL speed probing,
 Native ADSync Viterbi DP + PCHIP Warp / DescribeAlign DTW with Multilayer smoothing

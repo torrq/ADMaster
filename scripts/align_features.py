@@ -17,7 +17,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.signal import butter, fftconvolve, sosfiltfilt, resample_poly
 
-log = logging.getLogger("admaster")
+log = logging.getLogger("ADMaster")
 
 # ── Band filter edges & weights for speech suppression ────────────────────────
 BAND_EDGES = (250.0, 1200.0)
