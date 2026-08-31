@@ -536,7 +536,12 @@ def compute_sync_parameters(ffmpeg_bin, ffprobe_bin, base_path, ad_tracks, targe
                 multiband_normalized_correlation = None
 
         measurements = []
-        total_valid = len(anchor_times)
+        # Pre-filter anchors within both reference and AD duration limits
+        eligible_anchors = [
+            a for a in anchor_times
+            if (a + 30.0 <= target_duration) and (int((max(0.0, a - 30.0)) * sr) < len(ad_all_samples))
+        ]
+        total_valid = len(eligible_anchors)
         processed_count = 0
 
         for anchor in anchor_times:
