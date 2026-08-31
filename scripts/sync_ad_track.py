@@ -879,9 +879,170 @@ def mux_video_sample(ffmpeg_bin, video_src, audio_src,
         print(f"  Warning: MKV Video Muxing failed: {res.stderr}", flush=True)
 
 
+def extract_master_stereo_wav(
+    ffmpeg_bin: str,
+    ref_path: str,
+    ref_stream_map: str,
+    channels: int,
+    scratch_dir: str,
+    threads: int = 2
+) -> str:
+    """Extract or retrieve a clean 48kHz 2.0 stereo downmix of the master reference audio."""
+    ref_stereo_wav = os.path.join(scratch_dir, "ref_master_stereo_48k.wav")
+    if os.path.exists(ref_stereo_wav) and os.path.getsize(ref_stereo_wav) > 1000:
+        return ref_stereo_wav
+
+    print("  [GAP FILL] Pre-decoding Reference Master Audio 2.0 stereo downmix...", flush=True)
+    tmp_wav = os.path.join(scratch_dir, "ref_master_stereo_48k_tmp.wav")
+    cmd = [
+        ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "fatal",
+        "-threads", str(threads), "-fflags", "+genpts", "-i", ref_path
+    ]
+    if ref_stream_map:
+        cmd.extend(["-map", ref_stream_map])
+
+    if channels >= 6:
+        filter_str = "pan=stereo|c0=c0+0.7071*c2+0.7071*c4|c1=c1+0.7071*c2+0.7071*c5,asetpts=PTS-STARTPTS,aresample=48000"
+    else:
+        filter_str = "asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo"
+
+    cmd.extend(["-vn", "-af", filter_str, "-ac", "2", "-c:a", "pcm_s16le", tmp_wav])
+    subprocess.run(cmd, check=True)
+    os.replace(tmp_wav, ref_stereo_wav)
+    return ref_stereo_wav
+
+
+def fill_master_audio_gaps(
+    ffmpeg_bin: str,
+    ad_wav_path: str,
+    ref_path: str,
+    ref_stream_map: str,
+    channels: int,
+    scratch_dir: str,
+    threads: int = 2,
+    gap_min_duration: float = 1.5,
+    silence_threshold_rms: float = 0.002,
+    crossfade_ms: int = 50,
+) -> int:
+    """
+    Detects dead silence voids in warped AD audio (caused by excised scenes in alternate cuts)
+    and splices in volume-matched Reference Master Audio with equal-power cosine crossfades.
+    """
+    try:
+        import soundfile as sf
+        import numpy as np
+    except ImportError:
+        return 0
+
+    if not os.path.exists(ad_wav_path) or os.path.getsize(ad_wav_path) < 1000:
+        return 0
+
+    # Ensure ad_wav_path is 48000 Hz 16-bit stereo WAV
+    ad_info = sf.info(ad_wav_path)
+    if ad_info.samplerate != 48000 or ad_info.channels != 2:
+        tmp_48k = ad_wav_path.replace(".wav", "_48k_tmp.wav")
+        cmd_resample = [
+            ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "fatal",
+            "-threads", str(threads), "-i", ad_wav_path,
+            "-af", "asetpts=PTS-STARTPTS,aresample=48000",
+            "-ac", "2", "-c:a", "pcm_s16le", tmp_48k
+        ]
+        subprocess.run(cmd_resample, check=True)
+        os.replace(tmp_48k, ad_wav_path)
+        ad_info = sf.info(ad_wav_path)
+
+    sr = 48000
+    chunk_size = int(sr * 0.1)  # 100ms analysis window
+    gaps = []
+    in_gap = False
+    gap_start = 0.0
+
+    with sf.SoundFile(ad_wav_path) as f:
+        frame_idx = 0
+        while True:
+            data = f.read(chunk_size)
+            if len(data) == 0:
+                break
+            rms = float(np.sqrt(np.mean(data**2)))
+            t = frame_idx / sr
+            is_silent = (rms < silence_threshold_rms)
+
+            if is_silent and not in_gap:
+                in_gap = True
+                gap_start = t
+            elif not is_silent and in_gap:
+                in_gap = False
+                gap_dur = t - gap_start
+                if gap_dur >= gap_min_duration:
+                    gaps.append((gap_start, t, gap_dur))
+            frame_idx += len(data)
+
+        if in_gap:
+            gap_dur = (ad_info.frames / sr) - gap_start
+            if gap_dur >= gap_min_duration:
+                gaps.append((gap_start, ad_info.frames / sr, gap_dur))
+
+    if not gaps:
+        return 0
+
+    print(f"\n  [GAP FILL] Detected {len(gaps)} missing scene gap(s) (> {gap_min_duration:.1f}s) in AD track:", flush=True)
+    for s, e, d in gaps:
+        m_s, sec_s = divmod(int(s), 60)
+        h_s, m_s = divmod(m_s, 60)
+        m_e, sec_e = divmod(int(e), 60)
+        h_e, m_e = divmod(m_e, 60)
+        print(f"    - Missing Scene: {h_s:02d}:{m_s:02d}:{sec_s:02d} -> {h_e:02d}:{m_e:02d}:{sec_e:02d} ({d:.1f}s)", flush=True)
+
+    # Pre-decode / get Reference Master Audio stereo downmix
+    ref_stereo_wav = extract_master_stereo_wav(
+        ffmpeg_bin, ref_path, ref_stream_map, channels, scratch_dir, threads
+    )
+
+    ad_audio, _ = sf.read(ad_wav_path, dtype="float32")
+    master_audio, _ = sf.read(ref_stereo_wav, dtype="float32")
+
+    if ad_audio.ndim == 1:
+        ad_audio = np.column_stack((ad_audio, ad_audio))
+    if master_audio.ndim == 1:
+        master_audio = np.column_stack((master_audio, master_audio))
+
+    target_len = min(len(ad_audio), len(master_audio))
+    ad_audio = ad_audio[:target_len]
+    master_audio = master_audio[:target_len]
+
+    fade_len = int(sr * (crossfade_ms / 1000.0))
+    t_fade = np.linspace(0, np.pi / 2, fade_len)
+    fade_in = np.sin(t_fade)[:, np.newaxis]
+    fade_out = np.cos(t_fade)[:, np.newaxis]
+
+    for s, e, d in gaps:
+        start_idx = int(s * sr)
+        end_idx = min(int(e * sr), target_len)
+
+        if end_idx <= start_idx + 2 * fade_len:
+            ad_audio[start_idx:end_idx] = master_audio[start_idx:end_idx]
+            continue
+
+        ad_audio[start_idx:start_idx + fade_len] = (
+            ad_audio[start_idx:start_idx + fade_len] * fade_out +
+            master_audio[start_idx:start_idx + fade_len] * fade_in
+        )
+        ad_audio[start_idx + fade_len:end_idx - fade_len] = master_audio[start_idx + fade_len:end_idx - fade_len]
+        ad_audio[end_idx - fade_len:end_idx] = (
+            master_audio[end_idx - fade_len:end_idx] * fade_out +
+            ad_audio[end_idx - fade_len:end_idx] * fade_in
+        )
+
+    tmp_out = ad_wav_path.replace(".wav", "_gapfilled_tmp.wav")
+    sf.write(tmp_out, ad_audio, sr)
+    os.replace(tmp_out, ad_wav_path)
+    print(f"  [GAP FILL] Spliced Master Reference Audio into {len(gaps)} gap(s) with {crossfade_ms}ms crossfades.\n", flush=True)
+    return len(gaps)
+
+
 def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, sync_params, target_duration, out_dir, scratch_dir, ref_stream_map=None,
                      target_i=-16.0, target_tp=-1.5, preview_sec=None, video_mux_path=None, threads=2, keep_scratch=False, overwrite=False, no_night=False, debug=False,
-                     warp_engine="adsync", no_speed_detect=False, no_multiband=False):
+                     warp_engine="adsync", no_speed_detect=False, no_multiband=False, no_gap_fill=False):
     """Renders synced AD tracks: Stereo AAC (alimiter) and Night Mode AAC (loudnorm).
     Supports single-offset intermediate WAV rendering and dual-engine warp fallback (ADSync Viterbi DP / DescribeAlign DTW)."""
     print("\n=== RENDERING AUDIO DESCRIPTION TRACKS ===", flush=True)
@@ -1153,6 +1314,19 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                         f"  Stitched AD Audio Duration: {
                             len(stitched) / sr:.2f}s",
                         flush=True)
+
+            # Master Audio Gap Filling: Detect dead silence voids and splice in volume-matched Reference Master Audio
+            if not no_gap_fill and os.path.exists(raw_stitched_wav) and os.path.getsize(raw_stitched_wav) > 1000:
+                _, ref_channels, _ = get_audio_info(ffprobe_bin, ref_path, ref_stream_map)
+                fill_master_audio_gaps(
+                    ffmpeg_bin=ffmpeg_bin,
+                    ad_wav_path=raw_stitched_wav,
+                    ref_path=ref_path,
+                    ref_stream_map=ref_stream_map,
+                    channels=ref_channels or 2,
+                    scratch_dir=scratch_dir,
+                    threads=threads,
+                )
 
             # Encode Standard Stereo and Night Mode deliverables from raw_stitched_wav
             if os.path.exists(raw_stitched_wav) and os.path.getsize(raw_stitched_wav) > 1000:
@@ -1597,7 +1771,8 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
                     args, "no_night", False), debug=getattr(args, "debug", False),
                 warp_engine=getattr(args, "warp_engine", "adsync"),
                 no_speed_detect=getattr(args, "no_speed_detect", False),
-                no_multiband=getattr(args, "no_multiband", False)
+                no_multiband=getattr(args, "no_multiband", False),
+                no_gap_fill=getattr(args, "no_gap_fill", False)
             )
 
     if not args.keep_scratch:
@@ -1802,6 +1977,10 @@ normalization, and MKV sample multiplexing.
         "--no-multiband",
         action="store_true",
         help="Disable multiband narration-suppression in cross-correlation (use full-band)")
+    parser.add_argument(
+        "--no-gap-fill",
+        action="store_true",
+        help="Disable automatic Master Audio gap filling during deleted scenes / silence voids")
     parser.add_argument(
         "--target-i",
         type=float,
