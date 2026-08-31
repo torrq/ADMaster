@@ -106,23 +106,36 @@ To configure custom binary paths, encoding threads, or loudness targets:
   // Path to custom FFmpeg binary (leave empty to auto-discover in ./bin/ or PATH)
   "ffmpeg_path": "",
 
-  // Path to custom FFprobe binary
+  // Path to custom FFprobe binary (leave empty to auto-discover alongside FFmpeg)
   "ffprobe_path": "",
 
-  // Path to describealign.py script for DTW alignment
+  // Path to MKVToolNix binaries (auto-discovers in ./bin/, Program Files, or PATH)
+  "mkvmerge_path": "",
+  "mkvpropedit_path": "",
+  "mkvextract_path": "",
+
+  // Path to ADSync repository or package (auto-discovers in sibling folders)
+  "adsync_path": "",
+
+  // Path to describealign.py script for legacy DTW alignment
   "describealign_path": "",
+
+  // Default non-linear warp engine: "adsync" (default) or "describealign"
+  "default_warp_engine": "adsync",
 
   // CPU threads for FFmpeg encoding
   "default_threads": 2,
 
-  // Default target EBU R128 loudness (LUFS)
+  // Default target EBU R128 loudness (LUFS) and True Peak ceiling (dB)
   "default_target_i": -16.0,
-
-  // Default target True Peak ceiling (dB)
   "default_target_tp": -1.5,
 
-  // Correlation anchors sampled across timeline
+  // Correlation anchors sampled across timeline (Default: 100)
   "default_anchors": 100,
+
+  // Automatic acoustic feature detection
+  "default_multiband": true,
+  "default_speed_detect": true,
 
   // Overwrite existing output files (default: false)
   "default_overwrite": false,

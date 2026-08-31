@@ -37,7 +37,7 @@ For encoding specs, FFmpeg rules, and detailed workflow instructions, see the **
 * **Master Audio Gap Filling**: Detects deleted scenes / voids in the AD track and fills gaps seamlessly with volume-matched Blu-ray soundtrack audio.
 * **Automatic Directory Routing**: Automatically sets `<movie_dir>/output/` for final encodes and `<movie_dir>/scratch/` for temporary analysis files.
 * **Intermediate PCM WAV Rendering**: Decompresses and downmixes surround master audio and synchronized AD audio into clean 48kHz WAVs in `scratch/` once before rendering stereo variants. Eliminates redundant DTS/TrueHD decodes, accelerates `loudnorm` by 2-3x, and eliminates FFmpeg filter buffer stalls.
-* **Local Machine Configuration**: Automatically reads custom paths (`ffmpeg_path`, `ffprobe_path`, `describealign_path`) and default preferences (`default_threads`, `default_target_i`, `default_anchors`, `default_warp_engine`) from `config.local.json` or `config.json` (falling back to `config.default.json`).
+* **Local Machine Configuration**: Automatically reads custom paths (`ffmpeg_path`, `ffprobe_path`, `mkvmerge_path`, `mkvpropedit_path`, `mkvextract_path`, `adsync_path`, `describealign_path`) and default preferences (`default_warp_engine`, `default_speed_detect`, `default_multiband`, `default_threads`, `default_target_i`, `default_anchors`) from `config.local.json` or `config.json` (falling back to `config.default.json`).
 * **Thread Throttling (`--threads`)**: Enforces FFmpeg concurrency limit (default: `2` threads) to keep host systems responsive during heavy multi-track processing.
 * **Atomic Pre-Decoding**: Uses temporary files (`_tmp.wav`) and atomic `os.replace` to prevent corrupted/half-written cache files from cancelled tasks.
 * **Standard Audio Variants**:
@@ -173,8 +173,10 @@ See `scripts/README.md` for the full scripts index.
 
 ## 5. Standard Paths
 * **Project scripts**: `scripts\`
-* **DescribeAlign**: `describealign.py`
-* **FFmpeg binaries**: `ADMaster\bin\` (auto-resolved by Python scripts)
+* **ADSync engine**: `adsync_path` / sibling `..\ADSync`
+* **DescribeAlign engine**: `describealign_path` / `describealign.py`
+* **MKVToolNix binaries**: `mkvmerge_path`, `mkvpropedit_path`, `mkvextract_path`
+* **FFmpeg binaries**: `ffmpeg_path`, `ffprobe_path` / `ADMaster\bin\` (auto-resolved by Python scripts)
 
 ---
 
