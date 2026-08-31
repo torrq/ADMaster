@@ -1,3 +1,5 @@
+<img width="1672" height="500" alt="admaster" src="https://github.com/user-attachments/assets/f2a5f098-cf73-432d-a949-f856c72426cb" />
+
 # admaster -- Universal Audio Description & Secondary Audio Sync Toolkit
 
 **admaster** is a high-performance, automated Python toolkit for synchronizing, downmixing, loudness-normalizing, and packaging Audio Description (AD) and secondary commentary tracks for movies and television series.
