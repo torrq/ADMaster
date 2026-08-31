@@ -51,6 +51,76 @@ except ImportError:
         return np.correlate(a, b, mode=mode)
 
 
+class Color:
+    """ANSI color and terminal formatting palette for ADMaster."""
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+
+    # Foregrounds
+    RED = "\033[91m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    BLUE = "\033[94m"
+    MAGENTA = "\033[95m"
+    CYAN = "\033[96m"
+    WHITE = "\033[97m"
+    GRAY = "\033[90m"
+
+    @classmethod
+    def init(cls):
+        """Enable virtual terminal processing on Windows console."""
+        if os.name == 'nt':
+            try:
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                h = kernel32.GetStdHandle(-11)
+                m = ctypes.c_ulong()
+                if kernel32.GetConsoleMode(h, ctypes.byref(m)):
+                    kernel32.SetConsoleMode(h, m.value | 0x0004)
+            except Exception:
+                pass
+
+    @classmethod
+    def ok(cls, text="[OK]"):
+        return f"{cls.GREEN}{cls.BOLD}{text}{cls.RESET}"
+
+    @classmethod
+    def success(cls, text="[SUCCESS]"):
+        return f"{cls.GREEN}{cls.BOLD}{text}{cls.RESET}"
+
+    @classmethod
+    def warn(cls, text="[WARNING]"):
+        return f"{cls.YELLOW}{cls.BOLD}{text}{cls.RESET}"
+
+    @classmethod
+    def err(cls, text="[ERROR]"):
+        return f"{cls.RED}{cls.BOLD}{text}{cls.RESET}"
+
+    @classmethod
+    def info(cls, text="[INFO]"):
+        return f"{cls.CYAN}{cls.BOLD}{text}{cls.RESET}"
+
+    @classmethod
+    def gap(cls, text="[GAP FILL]"):
+        return f"{cls.BLUE}{cls.BOLD}{text}{cls.RESET}"
+
+    @classmethod
+    def track(cls, name):
+        return f"{cls.MAGENTA}{cls.BOLD}[{name}]{cls.RESET}"
+
+    @classmethod
+    def cyan(cls, text):
+        return f"{cls.CYAN}{cls.BOLD}{text}{cls.RESET}"
+
+    @classmethod
+    def bold(cls, text):
+        return f"{cls.WHITE}{cls.BOLD}{text}{cls.RESET}"
+
+
+Color.init()
+
+
 def load_config():
     """Loads configuration from config.local.json, config.json, or config.default.json, stripping comments."""
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -372,7 +442,7 @@ def find_offset_candidates(measurements, min_conf=0.15, cluster_tol=0.03):
 
 def compute_sync_parameters(ffmpeg_bin, ffprobe_bin, base_path, ad_tracks, target_duration, scratch_dir, ref_stream_map=None, num_anchors=100,
                             force_stretch=False, no_stretch=False, min_confidence=0.15, force_dtw=False, no_dtw_fallback=False, force_pal=False, no_pal=False,
-                            no_multiband=False, no_speed_detect=False):
+                            no_multiband=False, no_speed_detect=False, debug=False):
     """Computes delay offset via high-confidence multi-window FFT cross-correlation in memory."""
     print(
         "\n=== COMPUTING ACOUSTIC CROSS-CORRELATION SYNC PARAMETERS ===",
@@ -466,6 +536,9 @@ def compute_sync_parameters(ffmpeg_bin, ffprobe_bin, base_path, ad_tracks, targe
                 multiband_normalized_correlation = None
 
         measurements = []
+        total_valid = len(anchor_times)
+        processed_count = 0
+
         for anchor in anchor_times:
             if anchor + 30.0 > target_duration:
                 continue
@@ -507,14 +580,25 @@ def compute_sync_parameters(ffmpeg_bin, ffprobe_bin, base_path, ad_tracks, targe
 
             offset = search_start_s + (best_idx / sr) - anchor
             measurements.append((offset, norm_peak))
-            print(
-                f"  Anchor {
-                    anchor:4.0f}s: Measured Offset = {
-                    offset:+.3f}s | Confidence = {
-                    norm_peak *
-                    100:5.1f}% ({
-                    norm_peak:.4f})",
-                flush=True)
+            processed_count += 1
+
+            if debug:
+                print(
+                    f"  Anchor {anchor:4.0f}s: Measured Offset = {offset:+.3f}s | Confidence = {norm_peak * 100:5.1f}% ({norm_peak:.4f})",
+                    flush=True)
+            else:
+                pct = int(100 * processed_count / total_valid) if total_valid else 100
+                bar_len = 25
+                filled = int(bar_len * processed_count / total_valid) if total_valid else bar_len
+                bar = "=" * filled + "-" * (bar_len - filled)
+                cur_best = max(measurements, key=lambda m: m[1])
+                conf_c = Color.GREEN if cur_best[1] >= 0.20 else (Color.YELLOW if cur_best[1] >= 0.10 else Color.RED)
+                sys.stdout.write(f"\r  Correlation Progress: [{Color.CYAN}{bar}{Color.RESET}] {pct:3d}% ({processed_count}/{total_valid}) | Best: {Color.BOLD}{cur_best[0]:+.3f}s{Color.RESET} ({conf_c}{cur_best[1]*100:.1f}%{Color.RESET})")
+                sys.stdout.flush()
+
+        if not debug:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
 
         candidates = find_offset_candidates(
             measurements, min_conf=min_confidence)
@@ -585,27 +669,28 @@ def compute_sync_parameters(ffmpeg_bin, ffprobe_bin, base_path, ad_tracks, targe
                 min_confidence or has_insufficient_quorum or has_drifting_clusters) and not no_dtw_fallback:
             if has_drifting_clusters:
                 print(
-                    f"\n  [WARNING] Multiple distinct offset clusters detected across timeline (drifting offsets / reel changes / structural cuts).",
+                    f"  {Color.warn('[WARNING]')} Multiple distinct offset clusters detected across timeline (drifting offsets / reel changes / structural cuts).",
                     flush=True)
             elif has_insufficient_quorum:
                 print(
-                    f"\n  [WARNING] Insufficient anchor consensus: Only {winner_count}/{
+                    f"  {Color.warn('[WARNING]')} Insufficient anchor consensus: Only {winner_count}/{
                         len(measurements)} anchors agreed on winner offset with {
                         best_overall_confidence * 100:.1f}% peak confidence (< {min_quorum} anchors required for quorum).",
                     flush=True)
             else:
                 print(
-                    f"\n  [WARNING] Max correlation confidence is only {
+                    f"  {Color.warn('[WARNING]')} Max correlation confidence is only {
                         best_overall_confidence *
                         100:.1f}% (< {
                         min_confidence *
                         100:.1f}%) with erratic offsets.",
                     flush=True)
             print(
-                f"  [DIAGNOSTIC] Cut/version mismatch or structural edits detected for [{name}].",
+                f"  {Color.info('[DIAGNOSTIC]')} Cut/version mismatch or structural edits detected for {Color.track(name)}.",
                 flush=True)
+            warp_eng = CONFIG.get("default_warp_engine", "adsync").upper()
             print(
-                f"  [FALLBACK] Engaging DescribeAlign Dynamic Time Warping (DTW) + Smooth Stitching...",
+                f"  {Color.warn('[FALLBACK]')} Engaging {Color.cyan(warp_eng)} Dynamic Time Warping (DTW) + Smooth Stitching...",
                 flush=True)
             method = "dtw"
         else:
@@ -618,25 +703,18 @@ def compute_sync_parameters(ffmpeg_bin, ffprobe_bin, base_path, ad_tracks, targe
             "method": method,
             "is_pal": is_pal_track
         }
+        
+        conf_color = Color.GREEN if best_overall_confidence >= 0.20 else (Color.YELLOW if best_overall_confidence >= 0.10 else Color.RED)
+        method_str = Color.cyan("CROSS_CORRELATION") if method == "cross_correlation" else Color.warn("DTW")
         print(
-            f"\n  => SELECTED CONSENSUS OFFSET for [{name}]: {
-                init_offset:+.3f}s (Max Confidence: {
-                best_overall_confidence * 100:.1f}% / {
-                best_overall_confidence:.4f} | {winner_count}/{
-                    len(measurements)} anchors | Method: {
-                        method.upper()})",
+            f"  => {Color.ok('CONSENSUS OFFSET')} for {Color.track(name)}: {Color.bold(f'{init_offset:+.3f}s')} (Max Confidence: {conf_color}{best_overall_confidence * 100:.1f}%{Color.RESET} | {winner_count}/{len(measurements)} anchors | Method: {method_str})",
             flush=True)
 
         runner_up_idx = 1
         for r_off, r_peak, r_count in candidates[1:]:
             if abs(r_off - init_offset) > 0.01:
                 print(
-                    f"     Runner-up #{
-                        runner_up_idx:<15}: {
-                        r_off:+.3f}s (Max Confidence: {
-                        r_peak * 100:.1f}% / {
-                        r_peak:.4f} | {r_count}/{
-                        len(measurements)} anchors)",
+                    f"     Runner-up #{runner_up_idx:<6}: {Color.bold(f'{r_off:+.3f}s')} (Max Confidence: {r_peak * 100:.1f}% | {r_count}/{len(measurements)} anchors)",
                     flush=True)
                 runner_up_idx += 1
                 if runner_up_idx > 2:
@@ -1045,7 +1123,7 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                      warp_engine="adsync", no_speed_detect=False, no_multiband=False, no_gap_fill=False):
     """Renders synced AD tracks: Stereo AAC (alimiter) and Night Mode AAC (loudnorm).
     Supports single-offset intermediate WAV rendering and dual-engine warp fallback (ADSync Viterbi DP / DescribeAlign DTW)."""
-    print("\n=== RENDERING AUDIO DESCRIPTION TRACKS ===", flush=True)
+    print(f"\n{Color.CYAN}=== RENDERING AUDIO DESCRIPTION TRACKS ==={Color.RESET}", flush=True)
     os.makedirs(out_dir, exist_ok=True)
     os.makedirs(scratch_dir, exist_ok=True)
 
@@ -1080,27 +1158,18 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
 
         if stereo_exists and night_exists and mkv_exists and not overwrite:
             print(
-                f"\n  [SKIP] All AD deliverables for [{name}] already exist in output/ (use --overwrite to force re-render):",
+                f"\n  {Color.info('[SKIP]')} All AD deliverables for {Color.track(name)} already exist in output/ (use --overwrite to force re-render):",
                 flush=True)
             print(
-                f"    [OK] {
-                    os.path.basename(out_stereo)} ({
-                    os.path.getsize(out_stereo) / (
-                        1024 * 1024):.1f} MB)",
+                f"    {Color.ok()} {os.path.basename(out_stereo)} ({os.path.getsize(out_stereo) / (1024 * 1024):.1f} MB)",
                 flush=True)
             if not no_night:
                 print(
-                    f"    [OK] {
-                        os.path.basename(out_night)} ({
-                        os.path.getsize(out_night) / (
-                            1024 * 1024):.1f} MB)",
+                    f"    {Color.ok()} {os.path.basename(out_night)} ({os.path.getsize(out_night) / (1024 * 1024):.1f} MB)",
                     flush=True)
             if out_mkv and os.path.exists(out_mkv):
                 print(
-                    f"    [OK] {
-                        os.path.basename(out_mkv)} ({
-                        os.path.getsize(out_mkv) / (
-                            1024 * 1024):.1f} MB)",
+                    f"    {Color.ok()} {os.path.basename(out_mkv)} ({os.path.getsize(out_mkv) / (1024 * 1024):.1f} MB)",
                     flush=True)
             continue
 
@@ -1113,7 +1182,7 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
 
             if engine_used == "adsync":
                 print(
-                    f"\n--- [WARP MODE: ADSync Viterbi+PCHIP] Processing [{name}] ---",
+                    f"\n--- [{Color.CYAN}{Color.BOLD}WARP MODE: ADSync Viterbi+PCHIP{Color.RESET}] Processing {Color.track(name)} ---",
                     flush=True)
                 clean_name = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
                 adsync_scratch = os.path.join(scratch_dir, "adsync", clean_name)
@@ -1147,16 +1216,16 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                     rendered_debug_wav = os.path.join(adsync_scratch, "synced_ad.wav")
                     if os.path.exists(rendered_debug_wav):
                         shutil.copyfile(rendered_debug_wav, raw_stitched_wav)
-                        print(f"  [SUCCESS] ADSync Viterbi Warp rendered successfully! (Confidence: {report.confidence*100:.1f}%)", flush=True)
+                        print(f"  {Color.success('[SUCCESS]')} ADSync Viterbi Warp rendered successfully! (Confidence: {Color.bold(f'{report.confidence*100:.1f}%')})", flush=True)
                     else:
                         raise RuntimeError("ADSync did not output synced_ad.wav")
                 except Exception as e:
-                    print(f"  [WARN] ADSync native engine encountered issue ({e}). Falling back to DescribeAlign DTW...", flush=True)
+                    print(f"  {Color.warn('[WARN]')} ADSync native engine encountered issue ({e}). Falling back to DescribeAlign DTW...", flush=True)
                     engine_used = "describealign"
 
             if engine_used == "describealign":
                 print(
-                    f"\n--- [DTW MODE: DescribeAlign] Processing [{name}] via DescribeAlign & Smooth Stitching ---",
+                    f"\n--- [{Color.YELLOW}{Color.BOLD}DTW MODE: DescribeAlign{Color.RESET}] Processing {Color.track(name)} via DescribeAlign & Smooth Stitching ---",
                     flush=True)
                 da_script = find_describealign()
                 if not da_script:
@@ -1344,10 +1413,10 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                 res_stereo = subprocess.run(
                     cmd_stereo, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 if res_stereo.returncode == 0:
-                    print(f"  [SUCCESS] Saved: {out_stereo}", flush=True)
+                    print(f"  {Color.success('[SUCCESS]')} Saved: {Color.bold(out_stereo)}", flush=True)
                 else:
                     print(
-                        f"  Error rendering AD Stereo: {
+                        f"  {Color.err('[ERROR]')} Error rendering AD Stereo: {
                             res_stereo.stderr}", flush=True)
 
                 if not no_night:
@@ -1366,10 +1435,10 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                         cmd_night, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                     if res_night.returncode == 0:
                         print(
-                            f"  [SUCCESS] Saved: {out_night}", flush=True)
+                            f"  {Color.success('[SUCCESS]')} Saved: {Color.bold(out_night)}", flush=True)
                     else:
                         print(
-                            f"  Error rendering AD Night Mode: {
+                            f"  {Color.err('[ERROR]')} Error rendering AD Night Mode: {
                                 res_night.stderr}", flush=True)
 
                 if not keep_scratch:
@@ -1621,35 +1690,34 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
     target_duration, channels, ref_sr = get_audio_info(
         ffprobe_bin, ref_path, stream_selector=select_stream_probe)
 
-    print("================================================================================")
-    print(f"Reference Audio : {ref_path}")
+    print(f"{Color.CYAN}================================================================================{Color.RESET}")
+    print(f"{Color.bold('Reference Audio')} : {Color.GREEN}{ref_path}{Color.RESET}")
     print(
-        f"Stream Selection: {ref_stream_map} ({channels} Channels @ {ref_sr} Hz | Duration: {
-            target_duration:.2f}s)")
-    print(f"Movie Title     : {base_title}")
-    print(f"Project Dir     : {project_dir}")
-    print(f"Scratch Dir     : {scratch_dir}")
-    print(f"Output Dir      : {out_dir}")
-    print(f"AD Tracks Count : {len(ad_tracks)}")
+        f"{Color.bold('Stream Selection')}: {ref_stream_map} ({channels} Channels @ {ref_sr} Hz | Duration: {Color.bold(f'{target_duration:.2f}s')})")
+    print(f"{Color.bold('Movie Title')}     : {Color.CYAN}{base_title}{Color.RESET}")
+    print(f"{Color.bold('Project Dir')}     : {project_dir}")
+    print(f"{Color.bold('Scratch Dir')}     : {scratch_dir}")
+    print(f"{Color.bold('Output Dir')}      : {out_dir}")
+    print(f"{Color.bold('AD Tracks Count')} : {Color.MAGENTA}{len(ad_tracks)}{Color.RESET}")
     for name, p in ad_tracks.items():
-        print(f"  - [{name}]: {os.path.basename(p)}")
+        print(f"  - {Color.track(name)}: {os.path.basename(p)}")
     if args.convert_main:
         print(
-            f"Convert Main    : YES (Surround AC3 + True 2.0 Stereo AAC + Night Mode AAC)")
+            f"{Color.bold('Convert Main')}    : {Color.ok('YES')} (Surround AC3 + True 2.0 Stereo AAC + Night Mode AAC)")
     if args.force_dtw:
-        print(f"DTW Mode        : FORCED (DescribeAlign + Multilayer smooth stitch)")
+        print(f"{Color.bold('DTW Mode')}        : {Color.warn('FORCED')} ({CONFIG.get('default_warp_engine', 'adsync').upper()} + Multilayer smooth stitch)")
     if args.no_pal:
-        print(f"PAL Mode        : DISABLED (1.0x native speed enforced)")
+        print(f"{Color.bold('PAL Mode')}        : {Color.info('DISABLED')} (1.0x native speed enforced)")
     elif args.pal:
         print(
-            f"PAL Mode        : FORCED (Dynamic sample-rate PAL 25fps -> 23.976fps slowdown)")
+            f"{Color.bold('PAL Mode')}        : {Color.warn('FORCED')} (Dynamic sample-rate PAL 25fps -> 23.976fps slowdown)")
     if args.preview:
-        print(f"Preview Mode    : ON ({args.preview:.0f} seconds)")
+        print(f"{Color.bold('Preview Mode')}    : {Color.YELLOW}ON ({args.preview:.0f} seconds){Color.RESET}")
     print(
-        f"Overwrite Mode  : {
-            'ENABLED (--overwrite)' if args.overwrite else 'DISABLED (preserve existing files)'}")
-    print(f"FFmpeg Threads  : {args.threads}")
-    print("================================================================================")
+        f"{Color.bold('Overwrite Mode')}  : {
+            Color.warn('ENABLED (--overwrite)') if args.overwrite else Color.ok('DISABLED (preserve existing files)')}")
+    print(f"{Color.bold('FFmpeg Threads')}  : {args.threads}")
+    print(f"{Color.CYAN}================================================================================{Color.RESET}")
 
     # Pre-check: If all output deliverables already exist and overwrite is
     # False, skip everything!
@@ -1746,7 +1814,8 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
             min_confidence=args.min_confidence, force_dtw=args.force_dtw, no_dtw_fallback=args.no_dtw_fallback,
             force_pal=args.pal, no_pal=args.no_pal,
             no_multiband=getattr(args, "no_multiband", False),
-            no_speed_detect=getattr(args, "no_speed_detect", False)
+            no_speed_detect=getattr(args, "no_speed_detect", False),
+            debug=getattr(args, "debug", False)
         )
     else:
         print(
@@ -1783,28 +1852,32 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
         except Exception:
             pass
 
-    print("\n================================================================================")
-    print(f"SUCCESS: Processing completed for: {base_title}")
-    print(f"Deliverables located in: {out_dir}")
-    print("--------------------------------------------------------------------------------")
-    print("FINAL SYNC SUMMARY:")
+    print(f"\n{Color.CYAN}================================================================================{Color.RESET}")
+    print(f"{Color.success('SUCCESS')}: Processing completed for: {Color.bold(base_title)}")
+    print(f"Deliverables located in: {Color.cyan(out_dir)}")
+    print(f"{Color.CYAN}--------------------------------------------------------------------------------{Color.RESET}")
+    print(f"{Color.bold('FINAL SYNC SUMMARY:')}")
 
     if args.convert_main:
-        print(f"  Main Audio     : Processed (Surround/Stereo/Night Mode)")
+        print(f"  Main Audio     : {Color.ok('Processed')} (Surround / Stereo / Night Mode)")
 
     for name, params in sync_params.items():
         method = params.get("method", "cross_correlation")
-        print(f"\n  AD Track [{name}]")
-        print(f"    Sync Method  : {method.upper()}")
-        
+        print(f"\n  AD Track {Color.track(name)}")
+        method_str = Color.cyan("CROSS_CORRELATION") if method == "cross_correlation" else Color.warn("WARP / DTW")
+        print(f"    Sync Method  : {method_str}")
+
         if method == "cross_correlation":
-            print(f"    Global Offset: {params['offset']:+.3f}s")
+            conf_val = params.get('confidence', 0)
+            conf_c = Color.GREEN if conf_val >= 0.20 else (Color.YELLOW if conf_val >= 0.10 else Color.RED)
+            offset_val = params.get('offset', 0.0)
+            print(f"    Global Offset: {Color.bold(f'{offset_val:+.3f}s')}")
             print(f"    Time Stretch : {params['atempo']:.5f}x")
             print(f"    PAL Slowdown : {'Yes' if params.get('is_pal') else 'No'}")
-            print(f"    Confidence   : {params.get('confidence', 0) * 100:.1f}%")
+            print(f"    Confidence   : {conf_c}{conf_val * 100:.1f}%{Color.RESET}")
         elif method == "dtw":
             engine_str = getattr(args, "warp_engine", "adsync").upper()
-            print(f"    Engine       : {engine_str}")
+            print(f"    Engine       : {Color.bold(engine_str)}")
             clean_name = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
             dtw_plots_dir = os.path.join(scratch_dir, "describealign", clean_name, "alignment_plots")
             if os.path.exists(dtw_plots_dir):
@@ -1821,23 +1894,21 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
                                 h = int(m_s // 3600)
                                 m = int((m_s % 3600) // 60)
                                 sec = m_s % 60
-                                
+
                                 offset = s["master_start"] - s["audio_start"]
-                                
-                                # Only print actual structural cuts (where offset changes significantly)
+
                                 if i == 0:
-                                    print(f"      - Seg 1 starts at {h:02d}:{m:02d}:{sec:06.3f} (initial offset: {offset:+.3f}s)")
+                                    print(f"      - Seg 1 starts at {Color.CYAN}{h:02d}:{m:02d}:{sec:06.3f}{Color.RESET} (initial offset: {Color.bold(f'{offset:+.3f}s')})")
                                 else:
                                     prev = segs[i-1]
                                     prev_offset = prev["master_start"] - prev["audio_start"]
-                                    
-                                    # If offset changed by more than 50ms, it's a real structural cut/jump
+
                                     if abs(offset - prev_offset) > 0.05:
-                                        print(f"      - Seg {i+1} jumps to {h:02d}:{m:02d}:{sec:06.3f} (offset shifted to {offset:+.3f}s)")
+                                        print(f"      - Seg {i+1} jumps to {Color.CYAN}{h:02d}:{m:02d}:{sec:06.3f}{Color.RESET} (offset shifted to {Color.bold(f'{offset:+.3f}s')})")
                     except Exception as e:
                         print(f"    [Error parsing DTW plot for summary: {e}]")
 
-    print("================================================================================\n")
+    print(f"{Color.CYAN}================================================================================{Color.RESET}\n")
     return True
 
 
