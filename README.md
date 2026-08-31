@@ -1,8 +1,6 @@
-<img width="1200" height="275" alt="adsync" src="https://github.com/user-attachments/assets/077d4b0a-5649-40b6-af4c-9e76a175a1cf" />
+# admaster -- Universal Audio Description & Secondary Audio Sync Toolkit
 
-# adsync -- Universal Audio Description & Secondary Audio Sync Toolkit
-
-**adsync** is a high-performance, automated Python toolkit for synchronizing, downmixing, loudness-normalizing, and packaging Audio Description (AD) and secondary commentary tracks for movies and television series.
+**admaster** is a high-performance, automated Python toolkit for synchronizing, downmixing, loudness-normalizing, and packaging Audio Description (AD) and secondary commentary tracks for movies and television series.
 
 It provides sub-millisecond acoustic cross-correlation, dynamic Dynamic Time Warping (DTW) piecewise alignment with Multilayer transition smoothing, frame-accurate black-screen commercial break excision, broadcast-standard ITU-R BS.775 2.0 stereo downmixing, in-place Matroska flag management, and Plex Media Server collection integration.
 
