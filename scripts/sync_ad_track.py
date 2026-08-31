@@ -1663,6 +1663,8 @@ normalization, and MKV sample multiplexing.
     parser.add_argument(
         "-o",
         "--out",
+        "--outdir",
+        dest="outdir",
         default=None,
         help="Output directory (Defaults to <movie_dir>/output)")
     parser.add_argument(
