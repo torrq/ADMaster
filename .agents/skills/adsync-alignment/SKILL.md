@@ -69,6 +69,12 @@ args = [
 ```
 This allows full 64-bit RF64 decoding of multi-hour features (e.g., 728,691,230 frames / 4h13m) without truncation.
 
+### B. Windows `cp1252` Subprocess `UnicodeDecodeError` Fix
+* **Problem**: In Python on Windows, `subprocess.run(..., text=True)` defaults to `locale.getencoding()` (`cp1252`). When `ffprobe` probes media files containing UTF-8 characters (chapter names, metadata tags, unicode track titles), the background reader thread (`_readerthread`) crashes with:
+  `UnicodeDecodeError: 'charmap' codec can't decode byte 0x8d: character maps to <undefined>`.
+  This causes `subprocess.run` to return `stdout=None`, crashing `json.loads(result.stdout)` with `TypeError: the JSON object must be str, bytes or bytearray, not NoneType`.
+* **Patch Applied**: In `adsync.utils.subprocesses:run_ffmpeg` and `run_ffprobe`, explicitly pass `encoding="utf-8", errors="replace"` to all `subprocess.run` calls.
+
 ---
 
 ## 5. Integration in `ADMaster`
