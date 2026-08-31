@@ -73,8 +73,13 @@ python scripts/sync_ad_track.py "F:\uploads\queue\<MovieName>" --preview 180
 
 **Key Features**:
 * **Directory Auto-Discovery**: Point to any folder containing `source/` and `tosync/`. Automatically resolves reference audio/video, pairs all AD/commentary tracks, and outputs deliverables to `output/`.
-* **100-Anchor FFT Cross-Correlation**: Samples 100 anchors across the movie via fast FFT in memory (pre-decoding streams once to 8kHz mono WAV in `scratch/`).
-* **Direct DTW Bypass (`--force-dtw`)**: Bypasses the 100-anchor cross-correlation search entirely and jumps straight to DescribeAlign DTW piecewise alignment and Multilayer smooth stitching.
+* **100-Anchor Multiband Cross-Correlation**: Samples 100 anchors across the movie via fast FFT in memory with 3-band speech suppression (downweights speech band to 0.2).
+* **Automatic PAL / Speed Prober**: Employs landmark constellation hashing to detect PAL 25fps vs 23.976fps transfers in ~2 seconds without needing `[UK]` filename tags.
+* **Dual Warp Engines (`--warp-engine adsync|describealign`)**:
+  * `adsync` (Default): High-speed Viterbi candidate lattice DP + Monotone PCHIP warp + WSOLA rendering (~15-30s).
+  * `describealign` (Legacy): Linear programming DTW + Plateau Consolidation Multilayer stitcher.
+* **Master Audio Gap Filling**: Detects deleted scenes / voids in the AD track and fills gaps seamlessly with volume-matched Blu-ray soundtrack audio.
+* **Direct Warp Fast-Path (`--force-dtw`)**: Bypasses the 100-anchor cross-correlation search entirely and jumps straight to non-linear warp alignment.
 * **Stream Selection (`--ref-stream`)**: Specify exact audio stream in multi-track MKVs (e.g. `--ref-stream 0:a:1`).
 * **Dynamic Sample-Rate PAL Handling (`--pal` / `--no-pal`)**: Probes input sample rates (44.1k vs 48k) to compute exact dynamic clock values for PAL 25fps slowdowns:
   $$\text{asetrate} = \text{input\_sr} \times \frac{23.976024}{25.0}$$

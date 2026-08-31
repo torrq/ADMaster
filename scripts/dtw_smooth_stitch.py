@@ -733,11 +733,26 @@ def smooth_stitch_audio(segments, samples, sr,
         if read_e <= 0:
             continue
 
+        if (e - s) < 100:
+            # Deleted scene / timeline void (no AD audio for this master duration).
+            # Skip writing AD audio so Master Audio flows continuously through the gap.
+            continue
+
+        # Find the next real segment (with non-zero audio) to check for gaps
+        next_real_master_s = None
+        for j in range(i + 1, len(snapped)):
+            s_j, e_j = snapped[j]
+            if (e_j - s_j) >= 100:
+                seg_j = segments[j]
+                rate_j = seg_j.get("implied_rate", 1.0)
+                shift_j = s_j - int(seg_j["audio_start"] * sr)
+                m_shift_j = int(shift_j / rate_j) if rate_j > 0 else shift_j
+                next_real_master_s = int(seg_j["master_start"] * sr) + m_shift_j
+                break
+
         gap_after = True
-        if i < len(snapped) - 1:
-            next_master_s = snapped[i+1][0]
-            if next_master_s <= write_e:
-                gap_after = False
+        if next_real_master_s is not None and next_real_master_s <= (master_s + len(audio) + 100):
+            gap_after = False
 
         if len(audio) >= xf_samples:
             # 1. Start of Segment
@@ -747,7 +762,7 @@ def smooth_stitch_audio(segments, samples, sr,
             audio[:xf_samples] = audio[:xf_samples] * f_in
 
             # 2. Body of Segment
-            # We must ZERO OUT the Master Audio where the AD audio plays solo
+            # Zero out Master Audio where AD plays solo
             body_s = master_s + xf_samples
             body_e = write_e - xf_samples
             if body_e > body_s:
@@ -759,15 +774,14 @@ def smooth_stitch_audio(segments, samples, sr,
                 # Fade IN the Master Audio after the AD segment ends
                 canvas[write_e - xf_samples : write_e] *= f_in
             else:
-                # The next AD segment will overlap here, so ZERO OUT the Master Audio 
-                # so the Canvas only holds the pure fading AD tail
+                # The next AD segment will overlap here, so zero out the Master Audio
                 canvas[write_e - xf_samples : write_e] = 0.0
         else:
-            # For micro-segments, just zero out the Master Audio underneath it completely
+            # Short segment (<50ms): zero out Master Audio underneath it
             canvas[master_s : write_e] = 0.0
 
         if debug:
-            print(f"[DEBUG] Seg {i+1}: master_s={master_s}, write_e={write_e}, audio_len={len(audio)}, read_e={read_e}", flush=True)
+            print(f"[DEBUG] Seg {i+1}: master_s={master_s}, write_e={write_e}, audio_len={len(audio)}, gap_after={gap_after}", flush=True)
 
         canvas[master_s:write_e] += audio[:read_e]
         in_gap = gap_after

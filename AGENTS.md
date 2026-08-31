@@ -23,16 +23,21 @@ For encoding specs, FFmpeg rules, and detailed workflow instructions, see the **
 ### sync_ad_track.py (Unified Sync & Encoding Tool)
 * **Primary Mandate**: Always use `sync_ad_track.py` for queue and movie processing rather than creating custom one-off scripts.
 * **Directory Auto-Discovery**: Passing a folder path (e.g. `python scripts/sync_ad_track.py "F:\uploads\queue\<Movie>"`) automatically pairs `source/*` with all AD tracks in `tosync/*`.
-* **100-Anchor FFT Cross-Correlation**: Samples 100 anchors evenly across 5%-88% of the timeline via fast FFT in memory (pre-decoding streams once to 8kHz mono WAV in `scratch/`).
-* **Direct DTW Fast-Path (`--force-dtw`)**: Bypasses the 100-anchor search entirely and executes DescribeAlign DTW piecewise alignment and Multilayer transition smoothing directly.
+* **100-Anchor Multiband Cross-Correlation**: Samples 100 anchors evenly across 5%-88% of the timeline via fast FFT in memory with 3-band narration suppression (downweights speech band to 0.2).
+* **Automatic PAL / Speed Prober**: Uses landmark constellation hashing to automatically detect PAL 25fps vs 23.976fps transfers in ~2 seconds without needing `[UK]` filename clues.
+* **Dual Warp Engine Architecture (`--warp-engine adsync|describealign`)**:
+  * `adsync` (Default): High-speed Viterbi candidate lattice DP + Monotone PCHIP warp + WSOLA rendering (~15-30s).
+  * `describealign` (Legacy): Linear programming DTW + Plateau Consolidation Multilayer stitcher.
+* **Direct Warp Fast-Path (`--force-dtw`)**: Bypasses the 100-anchor search entirely and executes non-linear warp alignment directly.
 * **Stream Selection (`--ref-stream`)**: Choose specific audio tracks from multi-track MKVs (e.g. `--ref-stream 0:a:1`).
 * **Dynamic Sample-Rate PAL Handling (`--pal` / `--no-pal`)**: Probes input sample rates (44.1k vs 48k) to compute exact dynamic clock values for PAL 25fps slowdowns:
   $$\text{asetrate} = \text{input\_sr} \times \frac{23.976024}{25.0}$$
   Use `--no-pal` to enforce native 1.0x speed on shorter Theatrical Cuts.
 * **Strict 2.0 Downmix Matrix**: Enforces ITU-R BS.775 matrix (`pan=stereo|c0=c0+0.7071*c2+0.7071*c4|c1=c1+0.7071*c2+0.7071*c5`), `-ac 2`, and `-ar 48000` for all stereo and night mode deliverables.
+* **Master Audio Gap Filling**: Detects deleted scenes / voids in the AD track and fills gaps seamlessly with volume-matched Blu-ray soundtrack audio.
 * **Automatic Directory Routing**: Automatically sets `<movie_dir>/output/` for final encodes and `<movie_dir>/scratch/` for temporary analysis files.
 * **Intermediate PCM WAV Rendering**: Decompresses and downmixes surround master audio and synchronized AD audio into clean 48kHz WAVs in `scratch/` once before rendering stereo variants. Eliminates redundant DTS/TrueHD decodes, accelerates `loudnorm` by 2-3x, and eliminates FFmpeg filter buffer stalls.
-* **Local Machine Configuration**: Automatically reads custom paths (`ffmpeg_path`, `ffprobe_path`, `describealign_path`) and default preferences (`default_threads`, `default_target_i`, `default_anchors`) from `config.local.json` or `config.json` (falling back to `config.default.json`).
+* **Local Machine Configuration**: Automatically reads custom paths (`ffmpeg_path`, `ffprobe_path`, `describealign_path`) and default preferences (`default_threads`, `default_target_i`, `default_anchors`, `default_warp_engine`) from `config.local.json` or `config.json` (falling back to `config.default.json`).
 * **Thread Throttling (`--threads`)**: Enforces FFmpeg concurrency limit (default: `2` threads) to keep host systems responsive during heavy multi-track processing.
 * **Atomic Pre-Decoding**: Uses temporary files (`_tmp.wav`) and atomic `os.replace` to prevent corrupted/half-written cache files from cancelled tasks.
 * **Standard Audio Variants**:

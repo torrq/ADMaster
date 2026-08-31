@@ -64,15 +64,15 @@ python scripts/set_commentary_flags.py "X:\video\TV\Show_Title"
 
 ---
 
-## Alignment Strategies: Anchor Correlation vs. DescribeAlign DTW
+## Alignment Strategies: Anchor Correlation vs. Native Warp (ADSync) vs. DescribeAlign DTW
 
-| Feature / Metric | 100-Anchor Cross-Correlation (Default) | DescribeAlign Dynamic Time Warping (DTW) |
-| :--- | :--- | :--- |
-| **Best Used For** | Identical cuts (same edit, different audio delay or master). | Alternate cuts (Theatrical vs Extended, TV trims, commercials). |
-| **Audio Integrity** | **100% Bit-Perfect Linear Passthrough:** Preserves decoded PCM samples bit-for-bit. Zero pitch/tempo warping. | **Piecewise Reconstruction:** Slices into discrete segments and crossfades transitions. |
-| **Precision** | Sub-millisecond sample accuracy ($\pm 1\text{ms}$). | Quantized time step windows (~100ms resolution). |
-| **Execution Time** | **~2-4 seconds** via in-memory 8kHz FFT arrays. | **1-3 minutes** per track (feature extraction + LP optimization). |
-| **Diagnostic Role** | Consensus score immediately validates whether cuts match ($\ge 50\%$) or differ ($< 10\%$). | Engages automatically when anchor score confirms cut mismatch. |
+| Feature / Metric | 100-Anchor Multiband Cross-Correlation (Default) | Native ADSync Warp (Default Non-Linear) | DescribeAlign DTW (Legacy Non-Linear) |
+| :--- | :--- | :--- | :--- |
+| **Best Used For** | Identical cuts (same edit, different audio delay or drift). | Alternate cuts (Theatrical vs Extended, TV trims, reel splices). | Secondary DTW comparison & legacy plot processing. |
+| **Narration Suppression** | **3-Band Filtering:** Low/High prioritized; speech band ($300\text{Hz}-1.2\text{kHz}$) downweighted to 0.2. | **Multiband Lattice Scoring:** Downweights narration speech to lock onto background soundtrack. | Single-band linear programming optimization. |
+| **Audio Integrity** | **100% Bit-Perfect Linear Passthrough:** Preserves decoded PCM samples bit-for-bit. Zero pitch/tempo warping. | **Continuous PCHIP Warp + WSOLA:** Sample-by-sample monotone mapping with pitch preservation. | **Piecewise Reconstruction:** Slices into discrete segments and crossfades transitions. |
+| **PAL Speed Probing** | **Acoustic Landmark Probing:** Automatically detects 25/24 speed differences in ~2 seconds. | **Acoustic Landmark Probing:** Automatically detects 25/24 speed differences in ~2 seconds. | Filename heuristics (`[UK]`, `[PAL]`) or linear drift slope fitting. |
+| **Execution Time** | **~2-4 seconds** via in-memory FFT arrays. | **~15-30 seconds** via Viterbi dynamic programming. | **1-3 minutes** per track (feature extraction + LP optimization). |
 
 ---
 

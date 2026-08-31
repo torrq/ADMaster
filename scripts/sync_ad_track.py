@@ -317,7 +317,8 @@ def find_offset_candidates(measurements, min_conf=0.15, cluster_tol=0.03):
 
 
 def compute_sync_parameters(ffmpeg_bin, ffprobe_bin, base_path, ad_tracks, target_duration, scratch_dir, ref_stream_map=None, num_anchors=100,
-                            force_stretch=False, no_stretch=False, min_confidence=0.15, force_dtw=False, no_dtw_fallback=False, force_pal=False, no_pal=False):
+                            force_stretch=False, no_stretch=False, min_confidence=0.15, force_dtw=False, no_dtw_fallback=False, force_pal=False, no_pal=False,
+                            no_multiband=False, no_speed_detect=False):
     """Computes delay offset via high-confidence multi-window FFT cross-correlation in memory."""
     print(
         "\n=== COMPUTING ACOUSTIC CROSS-CORRELATION SYNC PARAMETERS ===",
@@ -352,6 +353,31 @@ def compute_sync_parameters(ffmpeg_bin, ffprobe_bin, base_path, ad_tracks, targe
         is_pal_track = (force_pal or ("uk" in name.lower(
         ) or "pal" in name.lower() or "25fps" in name.lower())) and not no_pal
 
+        # Automatic Acoustic Landmark Speed / PAL Probing
+        if not is_pal_track and not no_pal and not no_speed_detect:
+            try:
+                from align_features import detect_speed_pal
+            except ImportError:
+                try:
+                    from scripts.align_features import detect_speed_pal
+                except ImportError:
+                    detect_speed_pal = None
+
+            if detect_speed_pal is not None:
+                probe_ad_wav = predecode_to_mono_8k(
+                    ffmpeg_bin, path, scratch_dir, f"{name}_rawprobe", is_pal=False, input_sr=ad_sr
+                )
+                probe_ad_samples = read_wav_samples(probe_ad_wav)
+                if len(probe_ad_samples) > 0 and len(base_all_samples) > 0:
+                    is_detected_pal, speed_ratio, speed_conf = detect_speed_pal(
+                        base_all_samples, probe_ad_samples, sr=8000
+                    )
+                    if is_detected_pal:
+                        print(
+                            f"  [SPEED PROBE] Acoustic landmark probe detected PAL speed transfer (stretch ×{speed_ratio:.4f}) for [{name}]!",
+                            flush=True)
+                        is_pal_track = True
+
         if force_dtw:
             print(
                 f"\n[{name}] Forced DescribeAlign DTW mode enabled (bypassing cross-correlation search).",
@@ -377,6 +403,14 @@ def compute_sync_parameters(ffmpeg_bin, ffprobe_bin, base_path, ad_tracks, targe
             input_sr=ad_sr)
         ad_all_samples = read_wav_samples(ad_mono_wav)
 
+        try:
+            from align_features import multiband_normalized_correlation
+        except ImportError:
+            try:
+                from scripts.align_features import multiband_normalized_correlation
+            except ImportError:
+                multiband_normalized_correlation = None
+
         measurements = []
         for anchor in anchor_times:
             if anchor + 30.0 > target_duration:
@@ -401,10 +435,21 @@ def compute_sync_parameters(ffmpeg_bin, ffprobe_bin, base_path, ad_tracks, targe
             if len(ad_samples) < len(base_samples) or len(base_samples) == 0:
                 continue
 
-            corr = fftconvolve(ad_samples, base_samples[::-1], mode='valid')
-            best_idx = np.argmax(corr)
-            norm_peak = corr[best_idx] / (np.linalg.norm(base_samples) * np.linalg.norm(
-                ad_samples[best_idx:best_idx + len(base_samples)]) + 1e-9)
+            if multiband_normalized_correlation is not None and not no_multiband:
+                norm_corr = multiband_normalized_correlation(ad_samples, base_samples, sr, multiband=True)
+                if norm_corr is not None and len(norm_corr) > 0:
+                    best_idx = int(np.argmax(norm_corr))
+                    norm_peak = float(norm_corr[best_idx])
+                else:
+                    corr = fftconvolve(ad_samples, base_samples[::-1], mode='valid')
+                    best_idx = int(np.argmax(corr))
+                    norm_peak = float(corr[best_idx] / (np.linalg.norm(base_samples) * np.linalg.norm(
+                        ad_samples[best_idx:best_idx + len(base_samples)]) + 1e-9))
+            else:
+                corr = fftconvolve(ad_samples, base_samples[::-1], mode='valid')
+                best_idx = int(np.argmax(corr))
+                norm_peak = float(corr[best_idx] / (np.linalg.norm(base_samples) * np.linalg.norm(
+                    ad_samples[best_idx:best_idx + len(base_samples)]) + 1e-9))
 
             offset = search_start_s + (best_idx / sr) - anchor
             measurements.append((offset, norm_peak))
@@ -781,9 +826,10 @@ def mux_video_sample(ffmpeg_bin, video_src, audio_src,
 
 
 def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, sync_params, target_duration, out_dir, scratch_dir, ref_stream_map=None,
-                     target_i=-16.0, target_tp=-1.5, preview_sec=None, video_mux_path=None, threads=2, keep_scratch=False, overwrite=False, no_night=False, debug=False):
+                     target_i=-16.0, target_tp=-1.5, preview_sec=None, video_mux_path=None, threads=2, keep_scratch=False, overwrite=False, no_night=False, debug=False,
+                     warp_engine="adsync", no_speed_detect=False, no_multiband=False):
     """Renders synced AD tracks: Stereo AAC (alimiter) and Night Mode AAC (loudnorm).
-    Supports single-offset intermediate WAV rendering and automatic DescribeAlign DTW + Smooth Stitching fallback."""
+    Supports single-offset intermediate WAV rendering and dual-engine warp fallback (ADSync Viterbi DP / DescribeAlign DTW)."""
     print("\n=== RENDERING AUDIO DESCRIPTION TRACKS ===", flush=True)
     os.makedirs(out_dir, exist_ok=True)
     os.makedirs(scratch_dir, exist_ok=True)
@@ -847,17 +893,64 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
         _, _, ad_sr = get_audio_info(ffprobe_bin, path)
 
         if method == "dtw":
-            print(
-                f"\n--- [DTW MODE] Processing [{name}] via DescribeAlign & Smooth Stitching ---",
-                flush=True)
-            da_script = find_describealign()
-            if not da_script:
+            engine_used = warp_engine
+            raw_stitched_wav = os.path.join(scratch_dir, f"{name}_stitched_raw.wav")
+
+            if engine_used == "adsync":
                 print(
-                    f"  [ERROR] describealign.py not found on system! Falling back to single-offset render.",
+                    f"\n--- [WARP MODE: ADSync Viterbi+PCHIP] Processing [{name}] ---",
                     flush=True)
-                method = "cross_correlation"
-            else:
                 clean_name = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
+                adsync_scratch = os.path.join(scratch_dir, "adsync", clean_name)
+                os.makedirs(adsync_scratch, exist_ok=True)
+
+                try:
+                    import adsync._pipeline as ad_pipe
+                    import adsync.config as ad_conf
+                    from pathlib import Path
+                    import shutil
+
+                    cfg = ad_conf.SyncConfig(
+                        mode="warp",
+                        speed_detect=not no_speed_detect,
+                        fingerprint=True,
+                        crossfade_ms=50,
+                        output_sr=48000,
+                        analysis_sr=16000,
+                        multiband=not no_multiband,
+                    )
+
+                    report = ad_pipe.run_pipeline(
+                        video_path=Path(ref_path),
+                        ad_path=Path(path),
+                        output_path=None,
+                        config=cfg,
+                        debug_dir=Path(adsync_scratch),
+                        mux=False,
+                    )
+
+                    rendered_debug_wav = os.path.join(adsync_scratch, "synced_ad.wav")
+                    if os.path.exists(rendered_debug_wav):
+                        shutil.copyfile(rendered_debug_wav, raw_stitched_wav)
+                        print(f"  [SUCCESS] ADSync Viterbi Warp rendered successfully! (Confidence: {report.confidence*100:.1f}%)", flush=True)
+                    else:
+                        raise RuntimeError("ADSync did not output synced_ad.wav")
+                except Exception as e:
+                    print(f"  [WARN] ADSync native engine encountered issue ({e}). Falling back to DescribeAlign DTW...", flush=True)
+                    engine_used = "describealign"
+
+            if engine_used == "describealign":
+                print(
+                    f"\n--- [DTW MODE: DescribeAlign] Processing [{name}] via DescribeAlign & Smooth Stitching ---",
+                    flush=True)
+                da_script = find_describealign()
+                if not da_script:
+                    print(
+                        f"  [ERROR] describealign.py not found on system! Falling back to single-offset render.",
+                        flush=True)
+                    method = "cross_correlation"
+                else:
+                    clean_name = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
                 dtw_scratch = os.path.join(scratch_dir, "describealign", clean_name)
                 dtw_plots_dir = os.path.join(dtw_scratch, "alignment_plots")
                 dtw_out_dir = os.path.join(dtw_scratch, "videos_with_ad")
@@ -1001,65 +1094,63 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                         debug=debug, master_samples=master_samples
                     )
 
-                    raw_stitched_wav = os.path.join(
-                        scratch_dir, f"{name}_stitched_raw.wav")
                     dtw_smooth_stitch.write_wav(stitched, sr, raw_stitched_wav)
                     print(
                         f"  Stitched AD Audio Duration: {
                             len(stitched) / sr:.2f}s",
                         flush=True)
 
-                    # Encode Standard Stereo AAC from stitched WAV
+            # Encode Standard Stereo and Night Mode deliverables from raw_stitched_wav
+            if os.path.exists(raw_stitched_wav) and os.path.getsize(raw_stitched_wav) > 1000:
+                print(
+                    f"  Encoding Synced AD Stereo AAC 2.0 (alimiter)...",
+                    flush=True)
+                cmd_stereo = [
+                    ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "fatal", "-threads", str(
+                        threads),
+                    "-i", raw_stitched_wav,
+                    "-af", "alimiter=level_in=1:level_out=0.98:limit=0.98",
+                    "-ac", "2", "-ar", "48000",
+                    "-c:a", "aac", "-b:a", "256k", out_stereo
+                ]
+                res_stereo = subprocess.run(
+                    cmd_stereo, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                if res_stereo.returncode == 0:
+                    print(f"  [SUCCESS] Saved: {out_stereo}", flush=True)
+                else:
                     print(
-                        f"  Encoding Synced AD Stereo AAC 2.0 (alimiter)...",
+                        f"  Error rendering AD Stereo: {
+                            res_stereo.stderr}", flush=True)
+
+                if not no_night:
+                    print(
+                        f"  Encoding Synced AD Night Mode AAC 2.0 (loudnorm {target_i} LUFS)...",
                         flush=True)
-                    cmd_stereo = [
+                    cmd_night = [
                         ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "fatal", "-threads", str(
                             threads),
                         "-i", raw_stitched_wav,
-                        "-af", "alimiter=level_in=1:level_out=0.98:limit=0.98",
+                        "-af", f"loudnorm=I={target_i}:TP={target_tp}:LRA=11",
                         "-ac", "2", "-ar", "48000",
-                        "-c:a", "aac", "-b:a", "256k", out_stereo
+                        "-c:a", "aac", "-b:a", "256k", out_night
                     ]
-                    res_stereo = subprocess.run(
-                        cmd_stereo, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                    if res_stereo.returncode == 0:
-                        print(f"  [SUCCESS] Saved: {out_stereo}", flush=True)
+                    res_night = subprocess.run(
+                        cmd_night, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    if res_night.returncode == 0:
+                        print(
+                            f"  [SUCCESS] Saved: {out_night}", flush=True)
                     else:
                         print(
-                            f"  Error rendering AD Stereo: {
-                                res_stereo.stderr}", flush=True)
+                            f"  Error rendering AD Night Mode: {
+                                res_night.stderr}", flush=True)
 
-                    # Encode Night Mode AAC from stitched WAV
-                    if not no_night:
-                        print(
-                            f"  Encoding Synced AD Night Mode AAC 2.0 (loudnorm {target_i} LUFS)...",
-                            flush=True)
-                        cmd_night = [
-                            ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "fatal", "-threads", str(
-                                threads),
-                            "-i", raw_stitched_wav,
-                            "-af", f"loudnorm=I={target_i}:TP={target_tp}:LRA=11",
-                            "-ac", "2", "-ar", "48000",
-                            "-c:a", "aac", "-b:a", "256k", out_night
-                        ]
-                        res_night = subprocess.run(
-                            cmd_night, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                        if res_night.returncode == 0:
-                            print(
-                                f"  [SUCCESS] Saved: {out_night}", flush=True)
-                        else:
-                            print(
-                                f"  Error rendering AD Night Mode: {
-                                    res_night.stderr}", flush=True)
-
-                    if not keep_scratch:
-                        for sw in [ref_da_wav, ad_da_wav, raw_stitched_wav]:
-                            if os.path.exists(sw):
-                                try:
-                                    os.remove(sw)
-                                except Exception:
-                                    pass
+                if not keep_scratch:
+                    for sw in [raw_stitched_wav]:
+                        if os.path.exists(sw):
+                            try:
+                                os.remove(sw)
+                            except Exception:
+                                pass
 
                     if video_mux_path and os.path.exists(video_mux_path):
                         out_mkv = os.path.join(
@@ -1425,7 +1516,9 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
             ref_stream_map=ref_stream_map,
             num_anchors=args.anchors, force_stretch=args.force_stretch, no_stretch=args.no_stretch,
             min_confidence=args.min_confidence, force_dtw=args.force_dtw, no_dtw_fallback=args.no_dtw_fallback,
-            force_pal=args.pal, no_pal=args.no_pal
+            force_pal=args.pal, no_pal=args.no_pal,
+            no_multiband=getattr(args, "no_multiband", False),
+            no_speed_detect=getattr(args, "no_speed_detect", False)
         )
     else:
         print(
@@ -1447,7 +1540,10 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
                 out_dir, scratch_dir, ref_stream_map=ref_stream_map, target_i=args.target_i, target_tp=args.target_tp,
                 preview_sec=args.preview, video_mux_path=args.mux_video,
                 threads=args.threads, keep_scratch=args.keep_scratch, overwrite=args.overwrite, no_night=getattr(
-                    args, "no_night", False), debug=getattr(args, "debug", False)
+                    args, "no_night", False), debug=getattr(args, "debug", False),
+                warp_engine=getattr(args, "warp_engine", "adsync"),
+                no_speed_detect=getattr(args, "no_speed_detect", False),
+                no_multiband=getattr(args, "no_multiband", False)
             )
 
     if not args.keep_scratch:
@@ -1478,6 +1574,8 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
             print(f"    PAL Slowdown : {'Yes' if params.get('is_pal') else 'No'}")
             print(f"    Confidence   : {params.get('confidence', 0) * 100:.1f}%")
         elif method == "dtw":
+            engine_str = getattr(args, "warp_engine", "adsync").upper()
+            print(f"    Engine       : {engine_str}")
             clean_name = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
             dtw_plots_dir = os.path.join(scratch_dir, "describealign", clean_name, "alignment_plots")
             if os.path.exists(dtw_plots_dir):
@@ -1520,9 +1618,10 @@ def main():
 ================================================================================
 Universal Audio Description (AD) & Main Audio Sync & Encoding Tool
 ================================================================================
-Acoustic cross-correlation, DescribeAlign Dynamic Time Warping (DTW) with Multilayer
-smoothing (VAD + Zero-Crossing + 50ms Crossfade), ITU-R BS.775 2.0 downmixing,
-EBU R128 loudness normalization, and MKV sample multiplexing.
+Acoustic cross-correlation, Multiband narration suppression, Automatic PAL speed probing,
+Native ADSync Viterbi DP + PCHIP Warp / DescribeAlign DTW with Multilayer smoothing
+(VAD + Zero-Crossing + 50ms Crossfade), ITU-R BS.775 2.0 downmixing, EBU R128 loudness
+normalization, and MKV sample multiplexing.
 """,
         formatter_class=argparse.RawTextHelpFormatter
     )
@@ -1548,11 +1647,10 @@ EBU R128 loudness normalization, and MKV sample multiplexing.
         default=None,
         help="Path to reference audio/video file (MKV, DTS, AC3, etc.)")
     parser.add_argument(
-        "-a",
         "--ad",
         nargs="+",
         default=None,
-        help="Audio Description track(s). Format: 'Path' or 'TrackLabel=Path'")
+        help="Path to one or more AD audio files")
     parser.add_argument(
         "--ref-stream",
         default="0:a:0",
@@ -1564,7 +1662,7 @@ EBU R128 loudness normalization, and MKV sample multiplexing.
         help="Path to reference MKV/MP4 for multiplexing preview video sample")
     parser.add_argument(
         "-o",
-        "--outdir",
+        "--out",
         default=None,
         help="Output directory (Defaults to <movie_dir>/output)")
     parser.add_argument(
@@ -1573,13 +1671,10 @@ EBU R128 loudness normalization, and MKV sample multiplexing.
         default=None,
         help="Movie title prefix for output filenames")
     parser.add_argument(
-        "-p",
         "--preview",
         type=float,
-        nargs="?",
-        const=300.0,
         default=None,
-        help="Fast sync test: Render short preview sample (Default: 300s)")
+        help="Render only the first N seconds for rapid sync verification")
     parser.add_argument(
         "-f",
         "--force-overwrite",
@@ -1633,11 +1728,24 @@ EBU R128 loudness normalization, and MKV sample multiplexing.
     parser.add_argument(
         "--force-dtw",
         action="store_true",
-        help="Force DescribeAlign DTW alignment instead of cross-correlation")
+        help="Force warp/DTW alignment instead of cross-correlation")
     parser.add_argument(
         "--no-dtw-fallback",
         action="store_true",
-        help="Disable automatic DescribeAlign DTW fallback on low confidence")
+        help="Disable automatic warp/DTW fallback on low confidence")
+    parser.add_argument(
+        "--warp-engine",
+        choices=["adsync", "describealign"],
+        default=CONFIG.get("default_warp_engine", "adsync"),
+        help="Warp engine for non-linear / structural edits (Default: adsync - Viterbi DP + PCHIP; fallback: describealign)")
+    parser.add_argument(
+        "--no-speed-detect",
+        action="store_true",
+        help="Disable automatic acoustic PAL speed detection probe")
+    parser.add_argument(
+        "--no-multiband",
+        action="store_true",
+        help="Disable multiband narration-suppression in cross-correlation (use full-band)")
     parser.add_argument(
         "--target-i",
         type=float,

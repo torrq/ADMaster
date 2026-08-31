@@ -9,15 +9,16 @@ This directory contains the production-ready tools for acoustic audio descriptio
 | Script | Primary Responsibility | Modifies Video? | Input Types | Output Deliverables |
 | :--- | :--- | :---: | :--- | :--- |
 | **[`sync_ad_track.py`](#1-sync_ad_trackpy-master-sync--encoder)** | Universal acoustic alignment & audio encoding | No | MKV, MP4, DTS, AC3, FLAC, MP3, WAV | Aligned `-AD (Stereo).m4a`, `-AD (Night Mode).m4a`, `(Surround).ac3`, `(Stereo).m4a` |
-| **[`batch_orchestrator.py`](#2-batch_orchestratorpy-tv-season-orchestrator)** | Automated heuristic TV series strategy router | Conditional | Directory of MKV episodes + AD tracks | Synced MKVs via Direct Mux, Frame-Perfect Cut, or DTW |
-| **[`dtw_smooth_stitch.py`](#3-dtw_smooth_stitchpy-dtw-transition-smoother)** | Multilayer DTW transition smoother | No | Alignment map + Source AD audio | Stitched, smooth AD audio with VAD + Crossfades |
-| **[`batch_frameperfect.py`](#4-batch_frameperfectpy-commercial-break-cutter)** | Surgical video/audio commercial gap excision | Yes | MKVs with black commercial gaps | Clean MKV without black gaps, frame-accurate |
-| **[`remove_commercial_breaks.py`](#5-remove_commercial_breakspy-break-detector)** | Dual black & silence gap scanner | No | MKV video files | JSON / formatted slice timestamps |
-| **[`convert_main_tracks.py`](#6-convert_main_trackspy-master-audio-converter)** | Standalone 5.1/7.1 downmixing converter | No | Multi-channel audio / video | Surround AC3, True 2.0 Stereo AAC, Night Mode AAC |
-| **[`convert_ad_2pass.py`](#7-convert_ad_2passpy-2-pass-loudness-normalizer)** | Standalone 2-pass EBU R128 normalizer | No | Standalone audio files | Broadcast normalized 2.0 AAC |
-| **[`set_commentary_flags.py`](#8-set_commentary_flagspy-in-place-mkv-tagger)** | In-place Matroska commentary flagger | No | MKV files / directory | In-place tagged MKV (`flag-commentary=1`) |
-| **[`plex_ad_commentary_collections.py`](#9-plex_ad_commentary_collectionspy-plex-sync)** | Plex server collection maintainer | No | Plex media library | Smart static collections in Plex |
-| **[`parse_mpls.py`](#10-parse_mplspy-blu-ray-playlist-parser)** | Blu-ray 45 kHz PTS playlist parser | No | Retail `.mpls` playlist files | Clip list with exact in/out timestamps |
+| **[`align_features.py`](#2-align_featurespy-advanced-alignment-features)** | Multiband correlation, PAL prober, & ADSync warp engine | No | Audio numpy arrays / files | Filtered band correlations, speed ratios, warp time maps |
+| **[`batch_orchestrator.py`](#3-batch_orchestratorpy-tv-season-orchestrator)** | Automated heuristic TV series strategy router | Conditional | Directory of MKV episodes + AD tracks | Synced MKVs via Direct Mux, Frame-Perfect Cut, or DTW |
+| **[`dtw_smooth_stitch.py`](#4-dtw_smooth_stitchpy-dtw-transition-smoother)** | Multilayer DTW transition smoother | No | Alignment map + Source AD audio | Stitched, smooth AD audio with VAD + Crossfades |
+| **[`batch_frameperfect.py`](#5-batch_frameperfectpy-commercial-break-cutter)** | Surgical video/audio commercial gap excision | Yes | MKVs with black commercial gaps | Clean MKV without black gaps, frame-accurate |
+| **[`remove_commercial_breaks.py`](#6-remove_commercial_breakspy-break-detector)** | Dual black & silence gap scanner | No | MKV video files | JSON / formatted slice timestamps |
+| **[`convert_main_tracks.py`](#7-convert_main_trackspy-master-audio-converter)** | Standalone 5.1/7.1 downmixing converter | No | Multi-channel audio / video | Surround AC3, True 2.0 Stereo AAC, Night Mode AAC |
+| **[`convert_ad_2pass.py`](#8-convert_ad_2passpy-2-pass-loudness-normalizer)** | Standalone 2-pass EBU R128 normalizer | No | Standalone audio files | Broadcast normalized 2.0 AAC |
+| **[`set_commentary_flags.py`](#9-set_commentary_flagspy-in-place-mkv-tagger)** | In-place Matroska commentary flagger | No | MKV files / directory | In-place tagged MKV (`flag-commentary=1`) |
+| **[`plex_ad_commentary_collections.py`](#10-plex_ad_commentary_collectionspy-plex-sync)** | Plex server collection maintainer | No | Plex media library | Smart static collections in Plex |
+| **[`parse_mpls.py`](#11-parse_mplspy-blu-ray-playlist-parser)** | Blu-ray 45 kHz PTS playlist parser | No | Retail `.mpls` playlist files | Clip list with exact in/out timestamps |
 
 ---
 
@@ -28,15 +29,16 @@ Master tool for synchronizing external Audio Description tracks to reference med
 ### Key Capabilities:
 * **Directory Auto-Discovery**: Passing a folder automatically pairs `source/*` with all AD tracks in `tosync/*`.
 * **Batch Queue Processing (`--batch`)**: Iterates through all movie folders in a top-level queue directory sequentially.
-* **100-Anchor FFT Cross-Correlation**: Samples 100 timeline positions via fast FFT in memory (sub-millisecond $\pm 1\text{ms}$ precision, 100% bit-perfect linear passthrough).
-* **Skip Generation Overrides**: Supports --overwrite to force re-render existing outputs, and --no-night to skip loudnorm nighttime encode.
-  * **Forced DTW Fast-Path (`--force-dtw`)**: Bypasses correlation to directly execute DescribeAlign Dynamic Time Warping with Multilayer smoothing for alternate cuts.
-* **Dynamic Sample-Rate PAL Clock Math (`--pal` / `--no-pal`)**: Probes input sample rates (44.1k vs 48k) to calculate exact resampling ratios for PAL 25fps slowdowns:
-  $$\text{asetrate} = \text{input\_sr} \times \frac{23.976024}{25.0}$$
+* **100-Anchor Multiband Cross-Correlation**: Samples 100 timeline positions using 3-band narration suppression (downweights $300\text{Hz}-1.2\text{kHz}$ vocal frequencies) for peak sharpness against soundtrack effects.
+* **Automatic Acoustic PAL / Speed Prober**: Employs landmark constellation hashing to detect PAL 25fps vs 23.976fps transfers in ~2 seconds without needing `[UK]` filename tags.
+* **Dual Warp Engines (`--warp-engine adsync|describealign`)**:
+  * `adsync` (Default): High-speed Viterbi candidate lattice DP + Monotone PCHIP warp + WSOLA rendering (~15-30s).
+  * `describealign` (Legacy): Linear programming DTW + Plateau Consolidation Multilayer stitcher.
+* **Master Audio Gap Filling**: Automatically detects missing AD scenes/edits and seamlessly fills timeline voids with volume-matched Blu-ray soundtrack audio.
+* **Skip Generation Overrides**: Supports `--overwrite` to force re-render existing outputs, and `--no-night` to skip loudnorm nighttime encode.
 * **Strict ITU-R BS.775 2.0 Downmixing**: Enforces standard downmix matrix (`pan=stereo|c0=c0+0.7071*c2+0.7071*c4|c1=c1+0.7071*c2+0.7071*c5`), `-ac 2`, and `-ar 48000`.
 * **Overwrite Protection (`--overwrite` / `-f` / `--force-overwrite`)**: Prevents re-rendering deliverables that already exist in `output/` by default, saving CPU and time during queue re-runs.
-* **Detailed Final Sync Summary**: At the end of every successful run, outputs a comprehensive report detailing each track's global offset, sample-rate stretch, and (if DTW was used) a curated list of structural cut timestamps for easy manual verification.
-* **Local Machine Config Support**: Loads settings and paths from `config.local.json` or `config.json` (falls back to `config.default.json`). Toggleable `"debug_mode"` (or CLI `--debug`) enables verbosity for troubleshooting.
+* **Detailed Final Sync Summary**: Outputs a comprehensive report detailing global offset, sample-rate stretch, and structural cut timestamps for easy manual verification.
 
 ### Common Commands:
 ```powershell
