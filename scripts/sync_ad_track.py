@@ -600,9 +600,11 @@ def compute_sync_parameters(ffmpeg_bin, ffprobe_bin, base_path, ad_tracks, targe
                 bar_len = 25
                 filled = int(bar_len * processed_count / total_valid) if total_valid else bar_len
                 bar = "=" * filled + "-" * (bar_len - filled)
-                cur_best = max(measurements, key=lambda m: m[1])
-                conf_c = Color.GREEN if cur_best[1] >= 0.20 else (Color.YELLOW if cur_best[1] >= 0.10 else Color.RED)
-                sys.stdout.write(f"\r  Correlation Progress: [{Color.CYAN}{bar}{Color.RESET}] {pct:3d}% ({processed_count}/{total_valid}) | Best: {Color.BOLD}{cur_best[0]:+.3f}s{Color.RESET} ({conf_c}{cur_best[1]*100:.1f}%{Color.RESET})")
+                cur_cands = find_offset_candidates(measurements, min_conf=min_confidence)
+                winner_off, winner_conf, winner_cnt = cur_cands[0]
+                conf_c = Color.GREEN if winner_conf >= 0.20 else (Color.YELLOW if winner_conf >= 0.10 else Color.RED)
+                anchor_str = f"{winner_cnt} anchor" if winner_cnt == 1 else f"{winner_cnt} anchors"
+                sys.stdout.write(f"\r  Correlation Progress: [{Color.CYAN}{bar}{Color.RESET}] {pct:3d}% ({processed_count}/{total_valid}) | Best: {Color.BOLD}{winner_off:+.3f}s{Color.RESET} ({conf_c}{winner_conf*100:.1f}%{Color.RESET} | {anchor_str})")
                 sys.stdout.flush()
 
         if not debug:
