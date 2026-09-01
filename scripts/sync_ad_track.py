@@ -205,43 +205,58 @@ def extract_warp_cuts(params, scratch_dir=None, name=None, jump_threshold=0.20):
 
     # 1. ADSync Engine
     report = params.get("report")
+    pts = None
     if report and getattr(report, "warp_path", None) and getattr(report.warp_path, "points", None):
         pts = report.warp_path.points
-        if pts and len(pts) >= 2:
-            offsets = [p.target_time - p.source_time for p in pts]
-            runs = []
-            start = 0
-            for i in range(1, len(pts) + 1):
-                if i == len(pts) or abs(offsets[i] - offsets[i - 1]) > jump_threshold:
-                    seg_offsets = offsets[start:i]
-                    mid_off = float(np.median(seg_offsets))
-                    runs.append({
-                        "vid_start": pts[start].target_time,
-                        "vid_end": pts[i - 1].target_time,
-                        "offset": mid_off,
-                    })
-                    start = i
-            for idx, r in enumerate(runs):
-                if idx == 0:
-                    cuts.append({
-                        "index": 1,
-                        "vid_start": r["vid_start"],
-                        "vid_end": r["vid_end"],
-                        "offset": r["offset"],
-                        "jump": 0.0,
-                        "is_initial": True
-                    })
-                else:
-                    prev = runs[idx - 1]
-                    cuts.append({
-                        "index": idx + 1,
-                        "vid_start": r["vid_start"],
-                        "vid_end": r["vid_end"],
-                        "offset": r["offset"],
-                        "jump": r["offset"] - prev["offset"],
-                        "is_initial": False
-                    })
-            return cuts
+    elif scratch_dir and name:
+        clean_name = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
+        report_json_path = os.path.join(scratch_dir, "adsync", clean_name, "report.json")
+        if os.path.exists(report_json_path):
+            try:
+                with open(report_json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                pts_data = data.get("warp_path", {}).get("points", [])
+                if pts_data:
+                    from adsync.models import WarpPoint
+                    pts = [WarpPoint(**p) for p in pts_data]
+            except Exception:
+                pass
+
+    if pts and len(pts) >= 2:
+        offsets = [p.target_time - p.source_time for p in pts]
+        runs = []
+        start = 0
+        for i in range(1, len(pts) + 1):
+            if i == len(pts) or abs(offsets[i] - offsets[i - 1]) > jump_threshold:
+                seg_offsets = offsets[start:i]
+                mid_off = float(np.median(seg_offsets))
+                runs.append({
+                    "vid_start": pts[start].target_time,
+                    "vid_end": pts[i - 1].target_time,
+                    "offset": mid_off,
+                })
+                start = i
+        for idx, r in enumerate(runs):
+            if idx == 0:
+                cuts.append({
+                    "index": 1,
+                    "vid_start": r["vid_start"],
+                    "vid_end": r["vid_end"],
+                    "offset": r["offset"],
+                    "jump": 0.0,
+                    "is_initial": True
+                })
+            else:
+                prev = runs[idx - 1]
+                cuts.append({
+                    "index": idx + 1,
+                    "vid_start": r["vid_start"],
+                    "vid_end": r["vid_end"],
+                    "offset": r["offset"],
+                    "jump": r["offset"] - prev["offset"],
+                    "is_initial": False
+                })
+        return cuts
 
     # 2. DescribeAlign Engine (or fallback plot file)
     segs = params.get("describealign_segments")
@@ -1329,6 +1344,11 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                         shutil.copyfile(rendered_debug_wav, raw_stitched_wav)
                         sync_params[name]["report"] = report
                         sync_params[name]["engine_used"] = "adsync"
+                        try:
+                            with open(os.path.join(adsync_scratch, "report.json"), "w", encoding="utf-8") as f:
+                                f.write(report.model_dump_json(indent=2))
+                        except Exception:
+                            pass
                         print(f"  {Color.success('[SUCCESS]')} ADSync Viterbi Warp rendered successfully! (Confidence: {Color.bold(f'{report.confidence*100:.1f}%')})", flush=True)
                     else:
                         raise RuntimeError("ADSync did not output synced_ad.wav")
