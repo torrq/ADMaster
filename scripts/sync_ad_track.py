@@ -34,6 +34,7 @@ Usage Examples:
 """
 
 import argparse
+from datetime import datetime
 import glob
 import json
 import logging
@@ -150,6 +151,136 @@ def load_config():
 
 
 CONFIG = load_config()
+
+
+class TeeLogger:
+    """Duplicates stdout/stderr to a clean log file, stripping ANSI color escape sequences."""
+    def __init__(self, filepath):
+        self.terminal = sys.stdout
+        self.log_file = open(filepath, "w", encoding="utf-8", buffering=1)
+        self._ansi_re = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
+        self._last_was_cr = False
+
+    def write(self, message):
+        self.terminal.write(message)
+        clean_msg = self._ansi_re.sub('', message)
+
+        if '\r' in message and '\n' not in message:
+            self._last_was_cr = True
+            return
+        elif self._last_was_cr:
+            if '\n' in message:
+                self._last_was_cr = False
+            clean_msg = clean_msg.lstrip('\r')
+
+        if clean_msg:
+            self.log_file.write(clean_msg)
+            self.log_file.flush()
+
+    def flush(self):
+        self.terminal.flush()
+        self.log_file.flush()
+
+    def close(self):
+        if not self.log_file.closed:
+            self.log_file.flush()
+            self.log_file.close()
+
+
+def format_time_code(seconds: float) -> str:
+    """Format duration in seconds to standard HH:MM:SS.mmm timecode string."""
+    m, s = divmod(seconds, 60)
+    h, m = divmod(int(m), 60)
+    return f"{h:02d}:{m:02d}:{s:06.3f}" if h else f"00:{m:02d}:{s:06.3f}"
+
+
+def extract_warp_cuts(params, scratch_dir=None, name=None, jump_threshold=0.20):
+    """
+    Extracts cut transition timestamps and offset shifts from ADSync report or DescribeAlign segments.
+    Returns list of dicts:
+      [{'index': 1, 'vid_start': float, 'vid_end': float, 'offset': float, 'jump': float, 'is_initial': bool}, ...]
+    """
+    engine = params.get("engine_used", "adsync").lower()
+    cuts = []
+
+    # 1. ADSync Engine
+    report = params.get("report")
+    if report and getattr(report, "warp_path", None) and getattr(report.warp_path, "points", None):
+        pts = report.warp_path.points
+        if pts and len(pts) >= 2:
+            offsets = [p.target_time - p.source_time for p in pts]
+            runs = []
+            start = 0
+            for i in range(1, len(pts) + 1):
+                if i == len(pts) or abs(offsets[i] - offsets[i - 1]) > jump_threshold:
+                    seg_offsets = offsets[start:i]
+                    mid_off = float(np.median(seg_offsets))
+                    runs.append({
+                        "vid_start": pts[start].target_time,
+                        "vid_end": pts[i - 1].target_time,
+                        "offset": mid_off,
+                    })
+                    start = i
+            for idx, r in enumerate(runs):
+                if idx == 0:
+                    cuts.append({
+                        "index": 1,
+                        "vid_start": r["vid_start"],
+                        "vid_end": r["vid_end"],
+                        "offset": r["offset"],
+                        "jump": 0.0,
+                        "is_initial": True
+                    })
+                else:
+                    prev = runs[idx - 1]
+                    cuts.append({
+                        "index": idx + 1,
+                        "vid_start": r["vid_start"],
+                        "vid_end": r["vid_end"],
+                        "offset": r["offset"],
+                        "jump": r["offset"] - prev["offset"],
+                        "is_initial": False
+                    })
+            return cuts
+
+    # 2. DescribeAlign Engine (or fallback plot file)
+    segs = params.get("describealign_segments")
+    if not segs and scratch_dir and name:
+        clean_name = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
+        dtw_plots_dir = os.path.join(scratch_dir, "describealign", clean_name, "alignment_plots")
+        if os.path.exists(dtw_plots_dir):
+            found_plots = sorted(glob.glob(os.path.join(dtw_plots_dir, "*.txt")), key=os.path.getmtime, reverse=True)
+            if found_plots:
+                try:
+                    import dtw_smooth_stitch
+                    segs = dtw_smooth_stitch.parse_alignment_plot(found_plots[0])
+                except Exception:
+                    pass
+
+    if segs and len(segs) > 0:
+        for idx, s in enumerate(segs):
+            cur_off = s["master_start"] - s["audio_start"]
+            if idx == 0:
+                cuts.append({
+                    "index": 1,
+                    "vid_start": s["master_start"],
+                    "vid_end": s["master_end"],
+                    "offset": cur_off,
+                    "jump": 0.0,
+                    "is_initial": True
+                })
+            else:
+                prev_off = segs[idx - 1]["master_start"] - segs[idx - 1]["audio_start"]
+                cuts.append({
+                    "index": idx + 1,
+                    "vid_start": s["master_start"],
+                    "vid_end": s["master_end"],
+                    "offset": cur_off,
+                    "jump": cur_off - prev_off,
+                    "is_initial": False
+                })
+
+    return cuts
 
 # Portable local FFmpeg fallback
 DEFAULT_FFMPEG = CONFIG.get("ffmpeg_path") or os.path.join(
@@ -1196,6 +1327,8 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                     rendered_debug_wav = os.path.join(adsync_scratch, "synced_ad.wav")
                     if os.path.exists(rendered_debug_wav):
                         shutil.copyfile(rendered_debug_wav, raw_stitched_wav)
+                        sync_params[name]["report"] = report
+                        sync_params[name]["engine_used"] = "adsync"
                         print(f"  {Color.success('[SUCCESS]')} ADSync Viterbi Warp rendered successfully! (Confidence: {Color.bold(f'{report.confidence*100:.1f}%')})", flush=True)
                     else:
                         raise RuntimeError("ADSync did not output synced_ad.wav")
@@ -1359,6 +1492,8 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                     )
 
                     dtw_smooth_stitch.write_wav(stitched, sr, raw_stitched_wav)
+                    sync_params[name]["describealign_segments"] = segments
+                    sync_params[name]["engine_used"] = "describealign"
                     print(
                         f"  Stitched AD Audio Duration: {
                             len(stitched) / sr:.2f}s",
@@ -1675,237 +1810,234 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
         else:
             path = item
             label = os.path.splitext(os.path.basename(path))[0]
-
         if not os.path.exists(path):
             print(f"Error: AD track file not found: '{path}'")
             return False
         ad_tracks[label.strip()] = path.strip()
-
     _, ref_stream_map = format_stream_selector(args.ref_stream)
     select_stream_probe, _ = format_stream_selector(args.ref_stream)
     target_duration, channels, ref_sr = get_audio_info(
         ffprobe_bin, ref_path, stream_selector=select_stream_probe)
 
-    print(f"{Color.CYAN}================================================================================{Color.RESET}")
-    print(f"{Color.bold('Reference Audio')} : {Color.GREEN}{ref_path}{Color.RESET}")
-    print(
-        f"{Color.bold('Stream Selection')}: {ref_stream_map} ({channels} Channels @ {ref_sr} Hz | Duration: {Color.bold(f'{target_duration:.2f}s')})")
-    print(f"{Color.bold('Movie Title')}     : {Color.CYAN}{base_title}{Color.RESET}")
-    print(f"{Color.bold('Project Dir')}     : {project_dir}")
-    print(f"{Color.bold('Scratch Dir')}     : {scratch_dir}")
-    print(f"{Color.bold('Output Dir')}      : {out_dir}")
-    print(f"{Color.bold('AD Tracks Count')} : {Color.MAGENTA}{len(ad_tracks)}{Color.RESET}")
-    for name, p in ad_tracks.items():
-        print(f"  - {Color.track(name)}: {os.path.basename(p)}")
-    if args.convert_main:
-        print(
-            f"{Color.bold('Convert Main')}    : {Color.ok('YES')} (Surround AC3 + True 2.0 Stereo AAC + Night Mode AAC)")
-    if args.force_dtw:
-        print(f"{Color.bold('DTW Mode')}        : {Color.warn('FORCED')} ({CONFIG.get('default_warp_engine', 'adsync').upper()} + Multilayer smooth stitch)")
-    if args.no_pal:
-        print(f"{Color.bold('PAL Mode')}        : {Color.info('DISABLED')} (1.0x native speed enforced)")
-    elif args.pal:
-        print(
-            f"{Color.bold('PAL Mode')}        : {Color.warn('FORCED')} (Dynamic sample-rate PAL 25fps -> 23.976fps slowdown)")
-    if args.preview:
-        print(f"{Color.bold('Preview Mode')}    : {Color.YELLOW}ON ({args.preview:.0f} seconds){Color.RESET}")
-    print(
-        f"{Color.bold('Overwrite Mode')}  : {
-            Color.warn('ENABLED (--overwrite)') if args.overwrite else Color.ok('DISABLED (preserve existing files)')}")
-    print(f"{Color.bold('FFmpeg Threads')}  : {args.threads}")
-    print(f"{Color.CYAN}================================================================================{Color.RESET}")
+    # Determine session file logging
+    should_log = False
+    if getattr(args, "no_log_to_file", False):
+        should_log = False
+    elif getattr(args, "log_to_file", False):
+        should_log = True
+    else:
+        should_log = bool(CONFIG.get("log_to_file", False))
 
-    # Pre-check: If all output deliverables already exist and overwrite is
-    # False, skip everything!
-    render_duration = target_duration if not args.preview else min(
-        args.preview, target_duration)
-    suffix = f" (Preview {int(render_duration)}s)" if args.preview else ""
-    expected_outputs = []
+    tee_logger = None
+    log_filepath = None
+    if should_log:
+        log_dir = getattr(args, "log_dir", None) or CONFIG.get("log_dir") or ""
+        if not log_dir or not str(log_dir).strip():
+            log_dir = project_dir or target_dir or os.getcwd()
+        os.makedirs(log_dir, exist_ok=True)
 
-    if args.convert_main:
-        if channels >= 6:
+        clean_title = re.sub(r'[^a-zA-Z0-9_-]', '_', base_title or "ADMaster").strip('_')[:35]
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_filename = f"{timestamp}_{clean_title}.log"
+        log_filepath = os.path.join(log_dir, log_filename)
+
+        tee_logger = TeeLogger(log_filepath)
+        sys.stdout = tee_logger
+        sys.stderr = tee_logger
+
+    try:
+        print(f"{Color.CYAN}================================================================================{Color.RESET}")
+        print(f"{Color.bold('Reference Audio')} : {Color.GREEN}{ref_path}{Color.RESET}")
+        print(
+            f"{Color.bold('Stream Selection')}: {ref_stream_map} ({channels} Channels @ {ref_sr} Hz | Duration: {Color.bold(f'{target_duration:.2f}s')})")
+        print(f"{Color.bold('Movie Title')}     : {Color.CYAN}{base_title}{Color.RESET}")
+        print(f"{Color.bold('Project Dir')}     : {project_dir}")
+        print(f"{Color.bold('Scratch Dir')}     : {scratch_dir}")
+        print(f"{Color.bold('Output Dir')}      : {out_dir}")
+        if tee_logger and log_filepath:
+            print(f"{Color.bold('Session Log File')}: {Color.CYAN}{log_filepath}{Color.RESET}")
+        print(f"{Color.bold('AD Tracks Count')} : {Color.MAGENTA}{len(ad_tracks)}{Color.RESET}")
+        for name, p in ad_tracks.items():
+            print(f"  - {Color.track(name)}: {os.path.basename(p)}")
+        if args.convert_main:
+            print(
+                f"{Color.bold('Convert Main')}    : {Color.ok('YES')} (Surround AC3 + True 2.0 Stereo AAC + Night Mode AAC)")
+        if args.force_dtw:
+            print(f"{Color.bold('DTW Mode')}        : {Color.warn('FORCED')} ({CONFIG.get('default_warp_engine', 'adsync').upper()} + Multilayer smooth stitch)")
+        if args.no_pal:
+            print(f"{Color.bold('PAL Mode')}        : {Color.info('DISABLED')} (1.0x native speed enforced)")
+        elif args.pal:
+            print(
+                f"{Color.bold('PAL Mode')}        : {Color.warn('FORCED')} (Dynamic sample-rate PAL 25fps -> 23.976fps slowdown)")
+        if args.preview:
+            print(f"{Color.bold('Preview Mode')}    : {Color.YELLOW}ON ({args.preview:.0f} seconds){Color.RESET}")
+        print(
+            f"{Color.bold('Overwrite Mode')}  : {
+                Color.warn('ENABLED (--overwrite)') if args.overwrite else Color.ok('DISABLED (preserve existing files)')}")
+        print(f"{Color.bold('FFmpeg Threads')}  : {args.threads}")
+        print(f"{Color.CYAN}================================================================================{Color.RESET}")
+
+        # Pre-check: If all output deliverables already exist and overwrite is
+        # False, skip everything!
+        render_duration = target_duration if not args.preview else min(
+            args.preview, target_duration)
+        suffix = f" (Preview {int(render_duration)}s)" if args.preview else ""
+        expected_outputs = []
+
+        if args.convert_main:
+            if channels >= 6:
+                expected_outputs.append(
+                    os.path.join(
+                        out_dir,
+                        f"{base_title} (Surround){suffix}.ac3"))
             expected_outputs.append(
                 os.path.join(
                     out_dir,
-                    f"{base_title} (Surround){suffix}.ac3"))
-        expected_outputs.append(
-            os.path.join(
-                out_dir,
-                f"{base_title} (Stereo){suffix}.m4a"))
-        if not getattr(args, "no_night", False):
+                    f"{base_title} (Stereo){suffix}.m4a"))
+            if not getattr(args, "no_night", False):
+                expected_outputs.append(
+                    os.path.join(
+                        out_dir,
+                        f"{base_title} (Night Mode){suffix}.m4a"))
+
+        for name in ad_tracks.keys():
+            label_prefix = f"{base_title}-AD" if len(
+                ad_tracks) == 1 else f"{base_title}-AD [{name}]"
             expected_outputs.append(
                 os.path.join(
                     out_dir,
-                    f"{base_title} (Night Mode){suffix}.m4a"))
+                    f"{label_prefix} (Stereo){suffix}.m4a"))
+            if not getattr(args, "no_night", False):
+                expected_outputs.append(
+                    os.path.join(
+                        out_dir,
+                        f"{label_prefix} (Night Mode){suffix}.m4a"))
 
-    for name in ad_tracks.keys():
-        label_prefix = f"{base_title}-AD" if len(
-            ad_tracks) == 1 else f"{base_title}-AD [{name}]"
-        expected_outputs.append(
-            os.path.join(
-                out_dir,
-                f"{label_prefix} (Stereo){suffix}.m4a"))
-        if not getattr(args, "no_night", False):
-            expected_outputs.append(
-                os.path.join(
-                    out_dir,
-                    f"{label_prefix} (Night Mode){suffix}.m4a"))
-        if args.mux_video:
-            expected_outputs.append(
-                os.path.join(
-                    out_dir,
-                    f"{base_title} (Sample Sync Preview {
-                        int(render_duration)}s).mkv"))
+        all_exist = len(expected_outputs) > 0 and all(
+            os.path.exists(p) for p in expected_outputs)
+        if all_exist and not args.overwrite:
+            print(
+                f"\n  {Color.ok('[SKIP]')} All deliverables already exist in '{out_dir}'. Skipping job (use --overwrite to force re-render).",
+                flush=True)
+            return True
 
-    all_exist = len(expected_outputs) > 0 and all(os.path.exists(
-        p) and os.path.getsize(p) > 1000 for p in expected_outputs)
+        needed_ad_tracks = {}
+        for name, path in ad_tracks.items():
+            label_prefix = f"{base_title}-AD" if len(
+                ad_tracks) == 1 else f"{base_title}-AD [{name}]"
+            out_stereo = os.path.join(
+                out_dir, f"{label_prefix} (Stereo){suffix}.m4a")
+            out_night = os.path.join(
+                out_dir, f"{label_prefix} (Night Mode){suffix}.m4a")
 
-    if all_exist and not args.overwrite and not args.no_render:
-        print(
-            f"\n  [SKIP] All {
-                len(expected_outputs)} requested deliverables already exist in output/:")
-        for exp in expected_outputs:
-            size_mb = os.path.getsize(exp) / (1024 * 1024)
-            print(f"    [OK] {os.path.basename(exp)} ({size_mb:.1f} MB)")
-        print(f"\n  Skipping correlation analysis and rendering.")
-        print(f"  To force re-analyzing and re-rendering, pass --overwrite (or -f / --force-overwrite).")
-        print(
-            "================================================================================\n",
-            flush=True)
-        return True
+            stereo_exists = os.path.exists(out_stereo)
+            night_exists = os.path.exists(
+                out_night) if not getattr(
+                args, "no_night", False) else True
 
-    # Filter AD tracks that actually need to be aligned and rendered
-    needed_ad_tracks = {}
-    for name, p in ad_tracks.items():
-        label_prefix = f"{base_title}-AD" if len(
-            ad_tracks) == 1 else f"{base_title}-AD [{name}]"
-        out_stereo = os.path.join(
-            out_dir, f"{label_prefix} (Stereo){suffix}.m4a")
-        out_night = os.path.join(
-            out_dir, f"{label_prefix} (Night Mode){suffix}.m4a")
-        out_mkv = os.path.join(
-            out_dir, f"{base_title} (Sample Sync Preview {
-                int(render_duration)}s).mkv") if args.mux_video else None
+            if args.overwrite or not (stereo_exists and night_exists):
+                needed_ad_tracks[name] = path
+            else:
+                print(
+                    f"  [SKIP] All AD deliverables for [{name}] already exist. Skipping sync & render.",
+                    flush=True)
 
-        stereo_done = os.path.exists(out_stereo) and os.path.getsize(
-            out_stereo) > 1000 and not args.overwrite
-        night_done = True if getattr(args, "no_night", False) else (os.path.exists(
-            out_night) and os.path.getsize(out_night) > 1000 and not args.overwrite)
-        mkv_done = (not args.mux_video) or (os.path.exists(out_mkv)
-                                            and os.path.getsize(out_mkv) > 1000 and not args.overwrite)
-
-        if not (stereo_done and night_done and mkv_done):
-            needed_ad_tracks[name] = p
+        sync_params = {}
+        if needed_ad_tracks:
+            sync_params = compute_sync_parameters(
+                ffmpeg_bin, ffprobe_bin, ref_path, needed_ad_tracks, target_duration, scratch_dir,
+                ref_stream_map=ref_stream_map,
+                num_anchors=args.anchors, force_stretch=args.force_stretch, no_stretch=args.no_stretch,
+                min_confidence=args.min_confidence, force_dtw=args.force_dtw, no_dtw_fallback=args.no_dtw_fallback,
+                force_pal=args.pal, no_pal=args.no_pal,
+                no_multiband=getattr(args, "no_multiband", False),
+                no_speed_detect=getattr(args, "no_speed_detect", False),
+                debug=getattr(args, "debug", False)
+            )
         else:
             print(
-                f"  [SKIP] All AD deliverables for [{name}] already exist. Skipping sync & render.",
+                f"\n  [INFO] All AD deliverables already exist. Skipping acoustic cross-correlation.",
                 flush=True)
 
-    sync_params = {}
-    if needed_ad_tracks:
-        sync_params = compute_sync_parameters(
-            ffmpeg_bin, ffprobe_bin, ref_path, needed_ad_tracks, target_duration, scratch_dir,
-            ref_stream_map=ref_stream_map,
-            num_anchors=args.anchors, force_stretch=args.force_stretch, no_stretch=args.no_stretch,
-            min_confidence=args.min_confidence, force_dtw=args.force_dtw, no_dtw_fallback=args.no_dtw_fallback,
-            force_pal=args.pal, no_pal=args.no_pal,
-            no_multiband=getattr(args, "no_multiband", False),
-            no_speed_detect=getattr(args, "no_speed_detect", False),
-            debug=getattr(args, "debug", False)
-        )
-    else:
-        print(
-            f"\n  [INFO] All AD deliverables already exist. Skipping acoustic cross-correlation.",
-            flush=True)
+        if not args.no_render:
+            if args.convert_main:
+                render_main_tracks(
+                    ffmpeg_bin, ref_path, base_title, out_dir, scratch_dir, channels,
+                    stream_map=ref_stream_map, preview_sec=args.preview, threads=args.threads,
+                    keep_scratch=args.keep_scratch, overwrite=args.overwrite, no_night=getattr(
+                        args, "no_night", False)
+                )
 
-    if not args.no_render:
+            if needed_ad_tracks:
+                render_ad_tracks(
+                    ffmpeg_bin, ffprobe_bin, ref_path, base_title, needed_ad_tracks, sync_params, target_duration,
+                    out_dir, scratch_dir, ref_stream_map=ref_stream_map, target_i=args.target_i, target_tp=args.target_tp,
+                    preview_sec=args.preview, video_mux_path=args.mux_video,
+                    threads=args.threads, keep_scratch=args.keep_scratch, overwrite=args.overwrite, no_night=getattr(
+                        args, "no_night", False), debug=getattr(args, "debug", False),
+                    warp_engine=getattr(args, "warp_engine", "adsync"),
+                    no_speed_detect=getattr(args, "no_speed_detect", False),
+                    no_multiband=getattr(args, "no_multiband", False),
+                    no_gap_fill=getattr(args, "no_gap_fill", False)
+                )
+
+        if not args.keep_scratch:
+            try:
+                for f in os.listdir(scratch_dir):
+                    if f.endswith("_mono8k.wav") or f.endswith("_temp.wav"):
+                        os.remove(os.path.join(scratch_dir, f))
+            except Exception:
+                pass
+
+        print(f"\n{Color.CYAN}================================================================================{Color.RESET}")
+        print(f"{Color.success('SUCCESS')}: Processing completed for: {Color.bold(base_title)}")
+        print(f"Deliverables located in: {Color.cyan(out_dir)}")
+        print(f"{Color.CYAN}--------------------------------------------------------------------------------{Color.RESET}")
+        print(f"{Color.bold('FINAL SYNC SUMMARY:')}")
+
         if args.convert_main:
-            render_main_tracks(
-                ffmpeg_bin, ref_path, base_title, out_dir, scratch_dir, channels,
-                stream_map=ref_stream_map, preview_sec=args.preview, threads=args.threads,
-                keep_scratch=args.keep_scratch, overwrite=args.overwrite, no_night=getattr(
-                    args, "no_night", False)
-            )
+            print(f"  Main Audio     : {Color.ok('Processed')} (Surround / Stereo / Night Mode)")
 
-        if needed_ad_tracks:
-            render_ad_tracks(
-                ffmpeg_bin, ffprobe_bin, ref_path, base_title, needed_ad_tracks, sync_params, target_duration,
-                out_dir, scratch_dir, ref_stream_map=ref_stream_map, target_i=args.target_i, target_tp=args.target_tp,
-                preview_sec=args.preview, video_mux_path=args.mux_video,
-                threads=args.threads, keep_scratch=args.keep_scratch, overwrite=args.overwrite, no_night=getattr(
-                    args, "no_night", False), debug=getattr(args, "debug", False),
-                warp_engine=getattr(args, "warp_engine", "adsync"),
-                no_speed_detect=getattr(args, "no_speed_detect", False),
-                no_multiband=getattr(args, "no_multiband", False),
-                no_gap_fill=getattr(args, "no_gap_fill", False)
-            )
+        for name, params in sync_params.items():
+            method = params.get("method", "cross_correlation")
+            print(f"\n  AD Track {Color.track(name)}")
+            method_str = Color.cyan("CROSS_CORRELATION") if method == "cross_correlation" else Color.warn("WARP / DTW")
+            print(f"    Sync Method  : {method_str}")
 
-    if not args.keep_scratch:
-        try:
-            for f in os.listdir(scratch_dir):
-                if f.endswith("_mono8k.wav") or f.endswith("_temp.wav"):
-                    os.remove(os.path.join(scratch_dir, f))
-        except Exception:
-            pass
+            if method == "cross_correlation":
+                conf_val = params.get('confidence', 0)
+                conf_c = Color.GREEN if conf_val >= 0.20 else (Color.YELLOW if conf_val >= 0.10 else Color.RED)
+                offset_val = params.get('offset', 0.0)
+                print(f"    Global Offset: {Color.bold(f'{offset_val:+.3f}s')}")
+                print(f"    Time Stretch : {params['atempo']:.5f}x")
+                print(f"    PAL Slowdown : {'Yes' if params.get('is_pal') else 'No'}")
+                print(f"    Confidence   : {conf_c}{conf_val * 100:.1f}%{Color.RESET}")
+            elif method == "dtw":
+                engine_str = params.get("engine_used", getattr(args, "warp_engine", "adsync")).upper()
+                print(f"    Engine       : {Color.bold(engine_str)}")
+                cuts = extract_warp_cuts(params, scratch_dir=scratch_dir, name=name)
+                if cuts:
+                    print(f"    Warp Segments: {Color.bold(str(len(cuts)))} continuous blocks")
+                    significant_cuts = [c for c in cuts if c["is_initial"] or abs(c["jump"]) > 0.03]
+                    if len(significant_cuts) > 1:
+                        print(f"    {Color.YELLOW}Double-Check Cut Times (where AD track shifts):{Color.RESET}")
+                        max_display = 25
+                        for c in significant_cuts[:max_display]:
+                            t_str = format_time_code(c["vid_start"])
+                            if c["is_initial"]:
+                                print(f"      - Seg 1 starts at {Color.CYAN}{t_str}{Color.RESET} (initial offset: {Color.bold(f'{c[\"offset\"]:+.3f}s')})")
+                            else:
+                                print(f"      - Seg {c['index']} jumps at {Color.CYAN}{t_str}{Color.RESET} (offset: {Color.bold(f'{c[\"offset\"]:+.3f}s')}, shift: {Color.warn(f'{c[\"jump\"]:+.3f}s')})")
+                        if len(significant_cuts) > max_display:
+                            print(f"      ... and {len(significant_cuts) - max_display} more cut transition(s)")
 
-    print(f"\n{Color.CYAN}================================================================================{Color.RESET}")
-    print(f"{Color.success('SUCCESS')}: Processing completed for: {Color.bold(base_title)}")
-    print(f"Deliverables located in: {Color.cyan(out_dir)}")
-    print(f"{Color.CYAN}--------------------------------------------------------------------------------{Color.RESET}")
-    print(f"{Color.bold('FINAL SYNC SUMMARY:')}")
-
-    if args.convert_main:
-        print(f"  Main Audio     : {Color.ok('Processed')} (Surround / Stereo / Night Mode)")
-
-    for name, params in sync_params.items():
-        method = params.get("method", "cross_correlation")
-        print(f"\n  AD Track {Color.track(name)}")
-        method_str = Color.cyan("CROSS_CORRELATION") if method == "cross_correlation" else Color.warn("WARP / DTW")
-        print(f"    Sync Method  : {method_str}")
-
-        if method == "cross_correlation":
-            conf_val = params.get('confidence', 0)
-            conf_c = Color.GREEN if conf_val >= 0.20 else (Color.YELLOW if conf_val >= 0.10 else Color.RED)
-            offset_val = params.get('offset', 0.0)
-            print(f"    Global Offset: {Color.bold(f'{offset_val:+.3f}s')}")
-            print(f"    Time Stretch : {params['atempo']:.5f}x")
-            print(f"    PAL Slowdown : {'Yes' if params.get('is_pal') else 'No'}")
-            print(f"    Confidence   : {conf_c}{conf_val * 100:.1f}%{Color.RESET}")
-        elif method == "dtw":
-            engine_str = getattr(args, "warp_engine", "adsync").upper()
-            print(f"    Engine       : {Color.bold(engine_str)}")
-            clean_name = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
-            dtw_plots_dir = os.path.join(scratch_dir, "describealign", clean_name, "alignment_plots")
-            if os.path.exists(dtw_plots_dir):
-                found_plots = sorted(glob.glob(os.path.join(dtw_plots_dir, "*.txt")), key=os.path.getmtime, reverse=True)
-                if found_plots:
-                    try:
-                        import dtw_smooth_stitch
-                        segs = dtw_smooth_stitch.parse_alignment_plot(found_plots[0])
-                        print(f"    DTW Segments : {len(segs)} continuous blocks")
-                        if len(segs) > 1:
-                            print(f"    Double-Check Cut Times (where AD track shifts):")
-                            for i, s in enumerate(segs):
-                                m_s = s["master_start"]
-                                h = int(m_s // 3600)
-                                m = int((m_s % 3600) // 60)
-                                sec = m_s % 60
-
-                                offset = s["master_start"] - s["audio_start"]
-
-                                if i == 0:
-                                    print(f"      - Seg 1 starts at {Color.CYAN}{h:02d}:{m:02d}:{sec:06.3f}{Color.RESET} (initial offset: {Color.bold(f'{offset:+.3f}s')})")
-                                else:
-                                    prev = segs[i-1]
-                                    prev_offset = prev["master_start"] - prev["audio_start"]
-
-                                    if abs(offset - prev_offset) > 0.05:
-                                        print(f"      - Seg {i+1} jumps to {Color.CYAN}{h:02d}:{m:02d}:{sec:06.3f}{Color.RESET} (offset shifted to {Color.bold(f'{offset:+.3f}s')})")
-                    except Exception as e:
-                        print(f"    [Error parsing DTW plot for summary: {e}]")
-
-    print(f"{Color.CYAN}================================================================================{Color.RESET}\n")
-    return True
+        print(f"{Color.CYAN}================================================================================{Color.RESET}\n")
+        return True
+    finally:
+        if tee_logger:
+            sys.stdout = tee_logger.terminal
+            sys.stderr = tee_logger.terminal
+            tee_logger.close()
 
 
 def main():
@@ -2087,6 +2219,20 @@ normalization, and MKV sample multiplexing.
         "--ffmpeg",
         default=DEFAULT_FFMPEG,
         help="Path to ffmpeg executable")
+    parser.add_argument(
+        "--log-to-file",
+        action="store_true",
+        default=None,
+        help="Enable writing session output log to a timestamped file")
+    parser.add_argument(
+        "--no-log-to-file",
+        action="store_true",
+        default=False,
+        help="Disable writing session output log to file")
+    parser.add_argument(
+        "--log-dir",
+        default=None,
+        help="Directory path where run logs are stored (Defaults to config or target movie directory)")
 
     args = parser.parse_args()
     args.debug = args.debug or CONFIG.get("debug_mode", False)

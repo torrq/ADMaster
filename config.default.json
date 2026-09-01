@@ -60,5 +60,13 @@
   "default_overwrite": false,
 
   // Enable verbose debug logging (useful for troubleshooting warp mapping and cut points)
-  "debug_mode": false
+  "debug_mode": false,
+
+  // Whether to write session run logs to a file (Default: false).
+  // Creates one timestamped log file per run containing full console output.
+  "log_to_file": false,
+
+  // Directory path where run logs should be stored when log_to_file is enabled.
+  // If left empty (""), automatically defaults to the target movie directory passed in the argument.
+  "log_dir": ""
 }
