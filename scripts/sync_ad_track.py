@@ -157,12 +157,23 @@ class TeeLogger:
     """Duplicates stdout/stderr to a clean log file, stripping ANSI color escape sequences."""
     def __init__(self, filepath):
         self.terminal = sys.stdout
+        self.encoding = getattr(sys.stdout, "encoding", "utf-8") or "utf-8"
         self.log_file = open(filepath, "w", encoding="utf-8", buffering=1)
         self._ansi_re = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
         self._last_was_cr = False
 
     def write(self, message):
-        self.terminal.write(message)
+        try:
+            self.terminal.write(message)
+        except UnicodeEncodeError:
+            try:
+                term_enc = getattr(self.terminal, 'encoding', 'utf-8') or 'utf-8'
+                self.terminal.write(message.encode(term_enc, errors='replace').decode(term_enc))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
         clean_msg = self._ansi_re.sub('', message)
 
         if '\r' in message and '\n' not in message:
@@ -174,8 +185,11 @@ class TeeLogger:
             clean_msg = clean_msg.lstrip('\r')
 
         if clean_msg:
-            self.log_file.write(clean_msg)
-            self.log_file.flush()
+            try:
+                self.log_file.write(clean_msg)
+                self.log_file.flush()
+            except Exception:
+                pass
 
     def flush(self):
         self.terminal.flush()
@@ -1567,6 +1581,7 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                     explicit_gaps=explicit_gaps,
                     crossfade_ms=50,
                 )
+                sync_params[name]["explicit_gaps"] = explicit_gaps
 
             # Encode Standard Stereo and Night Mode deliverables from raw_stitched_wav
             if os.path.exists(raw_stitched_wav) and os.path.getsize(raw_stitched_wav) > 1000:
@@ -2096,6 +2111,14 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
                         print(f"    Speed Stretch: {report.speed_stretch:.6f}x ({(report.speed_stretch - 1) * 100:+.2f}%)")
                     if getattr(report, "global_offset", None) is not None:
                         print(f"    Global Offset: {Color.bold(f'{report.global_offset:+.3f}s')}")
+
+                gaps = params.get("explicit_gaps", [])
+                if gaps:
+                    total_gap_sec = sum(g[2] for g in gaps)
+                    m_g, s_g = divmod(int(total_gap_sec), 60)
+                    h_g, m_g = divmod(m_g, 60)
+                    dur_str = f"{h_g:02d}:{m_g:02d}:{s_g:02d}" if h_g else f"{m_g:02d}:{s_g:02d}"
+                    print(f"    {Color.warn('[NOTICE]')} AD Track has {len(gaps)} excised scene void(s) ({dur_str} missing from AD) -> Spliced with Reference Master Audio.")
 
                 cuts = extract_warp_cuts(params, scratch_dir=scratch_dir, name=name)
                 if cuts:
