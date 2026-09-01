@@ -1526,12 +1526,27 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
 
             # Master Audio Gap Filling: Splice in volume-matched Reference Master Audio into explicit excised scene voids
             explicit_gaps = []
-            if engine_used == "adsync" and 'report' in locals() and report and getattr(report, "segments", None) and len(report.segments) > 1:
-                for i in range(len(report.segments) - 1):
-                    g_start = report.segments[i].dst_end
-                    g_end = report.segments[i + 1].dst_start
-                    if g_end - g_start >= 3.0:
-                        explicit_gaps.append((g_start, g_end, g_end - g_start))
+            if engine_used == "adsync":
+                cuts = extract_warp_cuts(sync_params[name], scratch_dir=scratch_dir, name=name, jump_threshold=3.0)
+                if cuts:
+                    # Check intro gap (if movie starts before first AD warp point)
+                    if cuts[0]["vid_start"] >= 3.0 and cuts[0]["offset"] >= 3.0:
+                        explicit_gaps.append((0.0, cuts[0]["vid_start"], cuts[0]["vid_start"]))
+
+                    for i in range(len(cuts) - 1):
+                        c1 = cuts[i]
+                        c2 = cuts[i + 1]
+                        g_start = c1["vid_end"]
+                        g_end = c2["vid_start"]
+                        dst_gap = g_end - g_start
+                        offset_shift = c2["offset"] - c1["offset"]
+                        # An excised scene void occurs when the video continues across a structural cut (offset jump >= 3.0s)
+                        if dst_gap >= 3.0 and offset_shift >= 3.0:
+                            explicit_gaps.append((g_start, g_end, dst_gap))
+
+                    # Check outro gap (if movie ends after last AD warp point)
+                    if (target_duration - cuts[-1]["vid_end"]) >= 3.0:
+                        explicit_gaps.append((cuts[-1]["vid_end"], target_duration, target_duration - cuts[-1]["vid_end"]))
             elif engine_used == "describealign" and 'segments' in locals() and segments and len(segments) > 1:
                 for i in range(len(segments) - 1):
                     g_start = segments[i].get("master_end", 0.0)
