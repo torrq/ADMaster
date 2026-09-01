@@ -1349,6 +1349,11 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                                 f.write(report.model_dump_json(indent=2))
                         except Exception:
                             pass
+                        try:
+                            from adsync.report.json_report import print_summary as adsync_print_summary
+                            adsync_print_summary(report)
+                        except Exception:
+                            pass
                         print(f"  {Color.success('[SUCCESS]')} ADSync Viterbi Warp rendered successfully! (Confidence: {Color.bold(f'{report.confidence*100:.1f}%')})", flush=True)
                     else:
                         raise RuntimeError("ADSync did not output synced_ad.wav")
@@ -2053,6 +2058,30 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
             elif method == "dtw":
                 engine_str = params.get("engine_used", getattr(args, "warp_engine", "adsync")).upper()
                 print(f"    Engine       : {Color.bold(engine_str)}")
+
+                # Check for ADSync report metrics
+                report = params.get("report")
+                if not report and scratch_dir and name:
+                    clean_name = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
+                    report_json_path = os.path.join(scratch_dir, "adsync", clean_name, "report.json")
+                    if os.path.exists(report_json_path):
+                        try:
+                            with open(report_json_path, "r", encoding="utf-8") as f:
+                                data = json.load(f)
+                            from adsync.models import SyncReport
+                            report = SyncReport(**data)
+                        except Exception:
+                            pass
+
+                if report:
+                    conf_val = getattr(report, "confidence", 0.0)
+                    conf_c = Color.GREEN if conf_val >= 0.85 else (Color.YELLOW if conf_val >= 0.60 else Color.RED)
+                    print(f"    Confidence   : {conf_c}{conf_val * 100:.1f}%{Color.RESET}")
+                    if getattr(report, "speed_stretch", None) and abs(report.speed_stretch - 1.0) > 0.001:
+                        print(f"    Speed Stretch: {report.speed_stretch:.6f}x ({(report.speed_stretch - 1) * 100:+.2f}%)")
+                    if getattr(report, "global_offset", None) is not None:
+                        print(f"    Global Offset: {Color.bold(f'{report.global_offset:+.3f}s')}")
+
                 cuts = extract_warp_cuts(params, scratch_dir=scratch_dir, name=name)
                 if cuts:
                     print(f"    Warp Segments: {Color.bold(str(len(cuts)))} continuous blocks")
