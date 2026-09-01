@@ -1912,31 +1912,49 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
                     os.path.join(
                         out_dir,
                         f"{label_prefix} (Night Mode){suffix}.m4a"))
+            if args.mux_video:
+                expected_outputs.append(
+                    os.path.join(
+                        out_dir,
+                        f"{base_title} (Sample Sync Preview {int(render_duration)}s).mkv"))
 
-        all_exist = len(expected_outputs) > 0 and all(
-            os.path.exists(p) for p in expected_outputs)
-        if all_exist and not args.overwrite:
+        all_exist = len(expected_outputs) > 0 and all(os.path.exists(
+            p) and os.path.getsize(p) > 1000 for p in expected_outputs)
+
+        if all_exist and not args.overwrite and not args.no_render:
             print(
-                f"\n  {Color.ok('[SKIP]')} All deliverables already exist in '{out_dir}'. Skipping job (use --overwrite to force re-render).",
+                f"\n  [SKIP] All {len(expected_outputs)} requested deliverables already exist in output/:")
+            for exp in expected_outputs:
+                size_mb = os.path.getsize(exp) / (1024 * 1024)
+                print(f"    [OK] {os.path.basename(exp)} ({size_mb:.1f} MB)")
+            print(f"\n  Skipping correlation analysis and rendering.")
+            print(f"  To force re-analyzing and re-rendering, pass --overwrite (or -f / --force-overwrite).")
+            print(
+                "================================================================================\n",
                 flush=True)
             return True
 
+        # Filter AD tracks that actually need to be aligned and rendered
         needed_ad_tracks = {}
-        for name, path in ad_tracks.items():
+        for name, p in ad_tracks.items():
             label_prefix = f"{base_title}-AD" if len(
                 ad_tracks) == 1 else f"{base_title}-AD [{name}]"
             out_stereo = os.path.join(
                 out_dir, f"{label_prefix} (Stereo){suffix}.m4a")
             out_night = os.path.join(
                 out_dir, f"{label_prefix} (Night Mode){suffix}.m4a")
+            out_mkv = os.path.join(
+                out_dir, f"{base_title} (Sample Sync Preview {int(render_duration)}s).mkv") if args.mux_video else None
 
-            stereo_exists = os.path.exists(out_stereo)
-            night_exists = os.path.exists(
-                out_night) if not getattr(
-                args, "no_night", False) else True
+            stereo_done = os.path.exists(out_stereo) and os.path.getsize(
+                out_stereo) > 1000 and not args.overwrite
+            night_done = True if getattr(args, "no_night", False) else (os.path.exists(
+                out_night) and os.path.getsize(out_night) > 1000 and not args.overwrite)
+            mkv_done = (not args.mux_video) or (os.path.exists(out_mkv)
+                                                and os.path.getsize(out_mkv) > 1000 and not args.overwrite)
 
-            if args.overwrite or not (stereo_exists and night_exists):
-                needed_ad_tracks[name] = path
+            if not (stereo_done and night_done and mkv_done):
+                needed_ad_tracks[name] = p
             else:
                 print(
                     f"  [SKIP] All AD deliverables for [{name}] already exist. Skipping sync & render.",
@@ -2024,10 +2042,12 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
                         max_display = 25
                         for c in significant_cuts[:max_display]:
                             t_str = format_time_code(c["vid_start"])
+                            off_str = f"{c['offset']:+.3f}s"
+                            jump_str = f"{c['jump']:+.3f}s"
                             if c["is_initial"]:
-                                print(f"      - Seg 1 starts at {Color.CYAN}{t_str}{Color.RESET} (initial offset: {Color.bold(f'{c[\"offset\"]:+.3f}s')})")
+                                print(f"      - Seg 1 starts at {Color.CYAN}{t_str}{Color.RESET} (initial offset: {Color.bold(off_str)})")
                             else:
-                                print(f"      - Seg {c['index']} jumps at {Color.CYAN}{t_str}{Color.RESET} (offset: {Color.bold(f'{c[\"offset\"]:+.3f}s')}, shift: {Color.warn(f'{c[\"jump\"]:+.3f}s')})")
+                                print(f"      - Seg {c['index']} jumps at {Color.CYAN}{t_str}{Color.RESET} (offset: {Color.bold(off_str)}, shift: {Color.warn(jump_str)})")
                         if len(significant_cuts) > max_display:
                             print(f"      ... and {len(significant_cuts) - max_display} more cut transition(s)")
 
