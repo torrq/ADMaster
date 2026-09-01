@@ -1007,13 +1007,12 @@ def fill_master_audio_gaps(
     channels: int,
     scratch_dir: str,
     threads: int = 2,
-    gap_min_duration: float = 1.5,
-    silence_threshold_rms: float = 0.002,
+    explicit_gaps: list[tuple[float, float, float]] = None,
     crossfade_ms: int = 50,
 ) -> int:
     """
-    Detects dead silence voids in warped AD audio (caused by excised scenes in alternate cuts)
-    and splices in volume-matched Reference Master Audio with equal-power cosine crossfades.
+    Splices volume-matched Reference Master Audio with equal-power cosine crossfades
+    into explicit structural gap intervals (caused by excised scenes in alternate cuts).
     """
     try:
         import soundfile as sf
@@ -1021,8 +1020,10 @@ def fill_master_audio_gaps(
     except ImportError:
         return 0
 
-    if not os.path.exists(ad_wav_path) or os.path.getsize(ad_wav_path) < 1000:
+    if not explicit_gaps or not os.path.exists(ad_wav_path) or os.path.getsize(ad_wav_path) < 1000:
         return 0
+
+    gaps = explicit_gaps
 
     # Ensure ad_wav_path is 48000 Hz 16-bit stereo WAV
     ad_info = sf.info(ad_wav_path)
@@ -1039,46 +1040,14 @@ def fill_master_audio_gaps(
         ad_info = sf.info(ad_wav_path)
 
     sr = 48000
-    chunk_size = int(sr * 0.1)  # 100ms analysis window
-    gaps = []
-    in_gap = False
-    gap_start = 0.0
 
-    with sf.SoundFile(ad_wav_path) as f:
-        frame_idx = 0
-        while True:
-            data = f.read(chunk_size)
-            if len(data) == 0:
-                break
-            rms = float(np.sqrt(np.mean(data**2)))
-            t = frame_idx / sr
-            is_silent = (rms < silence_threshold_rms)
-
-            if is_silent and not in_gap:
-                in_gap = True
-                gap_start = t
-            elif not is_silent and in_gap:
-                in_gap = False
-                gap_dur = t - gap_start
-                if gap_dur >= gap_min_duration:
-                    gaps.append((gap_start, t, gap_dur))
-            frame_idx += len(data)
-
-        if in_gap:
-            gap_dur = (ad_info.frames / sr) - gap_start
-            if gap_dur >= gap_min_duration:
-                gaps.append((gap_start, ad_info.frames / sr, gap_dur))
-
-    if not gaps:
-        return 0
-
-    print(f"\n  [GAP FILL] Detected {len(gaps)} missing scene gap(s) (> {gap_min_duration:.1f}s) in AD track:", flush=True)
+    print(f"\n  [GAP FILL] Splicing Reference Master Audio into {len(gaps)} explicit missing scene gap(s):", flush=True)
     for s, e, d in gaps:
         m_s, sec_s = divmod(int(s), 60)
         h_s, m_s = divmod(m_s, 60)
         m_e, sec_e = divmod(int(e), 60)
         h_e, m_e = divmod(m_e, 60)
-        print(f"    - Missing Scene: {h_s:02d}:{m_s:02d}:{sec_s:02d} -> {h_e:02d}:{m_e:02d}:{sec_e:02d} ({d:.1f}s)", flush=True)
+        print(f"    - Excised Scene Void: {h_s:02d}:{m_s:02d}:{sec_s:02d} -> {h_e:02d}:{m_e:02d}:{sec_e:02d} ({d:.1f}s)", flush=True)
 
     # Pre-decode / get Reference Master Audio stereo downmix
     ref_stereo_wav = extract_master_stereo_wav(
@@ -1393,8 +1362,22 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                             len(stitched) / sr:.2f}s",
                         flush=True)
 
-            # Master Audio Gap Filling: Detect dead silence voids and splice in volume-matched Reference Master Audio
-            if not no_gap_fill and os.path.exists(raw_stitched_wav) and os.path.getsize(raw_stitched_wav) > 1000:
+            # Master Audio Gap Filling: Splice in volume-matched Reference Master Audio into explicit excised scene voids
+            explicit_gaps = []
+            if engine_used == "adsync" and 'report' in locals() and report and getattr(report, "segments", None) and len(report.segments) > 1:
+                for i in range(len(report.segments) - 1):
+                    g_start = report.segments[i].dst_end
+                    g_end = report.segments[i + 1].dst_start
+                    if g_end - g_start >= 3.0:
+                        explicit_gaps.append((g_start, g_end, g_end - g_start))
+            elif engine_used == "describealign" and 'segments' in locals() and segments and len(segments) > 1:
+                for i in range(len(segments) - 1):
+                    g_start = segments[i].get("master_end", 0.0)
+                    g_end = segments[i + 1].get("master_start", 0.0)
+                    if g_end - g_start >= 3.0:
+                        explicit_gaps.append((g_start, g_end, g_end - g_start))
+
+            if not no_gap_fill and explicit_gaps and os.path.exists(raw_stitched_wav) and os.path.getsize(raw_stitched_wav) > 1000:
                 _, ref_channels, _ = get_audio_info(ffprobe_bin, ref_path, ref_stream_map)
                 fill_master_audio_gaps(
                     ffmpeg_bin=ffmpeg_bin,
@@ -1404,6 +1387,8 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                     channels=ref_channels or 2,
                     scratch_dir=scratch_dir,
                     threads=threads,
+                    explicit_gaps=explicit_gaps,
+                    crossfade_ms=50,
                 )
 
             # Encode Standard Stereo and Night Mode deliverables from raw_stitched_wav
