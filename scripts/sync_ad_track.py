@@ -1234,7 +1234,8 @@ def fill_master_audio_gaps(
         ref_mono = np.mean(master_audio[::downsample_factor], axis=1)
 
         frame_len = int(0.05 * sr_down)  # 50ms frames
-        n_frames = min(len(ad_mono), len(ref_mono)) // frame_len
+        max_down_samples = min(len(ad_mono), len(ref_mono))
+        n_frames = max_down_samples // frame_len
         if n_frames > 0:
             ad_frames = ad_mono[:n_frames * frame_len].reshape(-1, frame_len)
             ref_frames = ref_mono[:n_frames * frame_len].reshape(-1, frame_len)
@@ -1268,18 +1269,34 @@ def fill_master_audio_gaps(
     if not all_gaps:
         return 0, []
 
-    # Merge overlapping or near-contiguous intervals (within 100ms)
+    # Merge overlapping or near-contiguous intervals (within 200ms)
     sorted_gaps = sorted(all_gaps, key=lambda x: x[0])
     merged = []
     for s, e, _ in sorted_gaps:
         if not merged:
             merged.append([s, e])
         else:
-            if s <= merged[-1][1] + 0.10:
+            if s <= merged[-1][1] + 0.20:
                 merged[-1][1] = max(merged[-1][1], e)
             else:
                 merged.append([s, e])
-    gaps = [(s, e, e - s) for s, e in merged if (e - s) >= 0.10]
+    raw_gaps = [(s, e, e - s) for s, e in merged if (e - s) >= 0.10]
+
+    # Safeguard: Never overwrite active AD audio/narration with master reference audio!
+    # If the region already contains non-silent AD audio (RMS >= 0.003), preserve the AD narration.
+    safe_gaps = []
+    for s, e, d in raw_gaps:
+        start_idx = int(s * sr)
+        end_idx = min(int(e * sr), target_len)
+        if end_idx <= start_idx:
+            continue
+        ad_region = ad_audio[start_idx:end_idx]
+        ad_reg_rms = float(np.sqrt(np.mean(ad_region**2)))
+        if ad_reg_rms >= 0.003:
+            # Active AD audio / speech present - skip to protect narration!
+            continue
+        safe_gaps.append((s, e, d))
+    gaps = safe_gaps
 
     if not gaps:
         return 0, []
@@ -1401,52 +1418,65 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                 adsync_scratch = os.path.join(scratch_dir, "adsync", clean_name)
                 os.makedirs(adsync_scratch, exist_ok=True)
 
-                try:
-                    import adsync._pipeline as ad_pipe
-                    import adsync.config as ad_conf
-                    from pathlib import Path
+                rendered_debug_wav = os.path.join(adsync_scratch, "synced_ad.wav")
+                report_json = os.path.join(adsync_scratch, "report.json")
+                use_cache = (
+                    os.path.exists(rendered_debug_wav)
+                    and os.path.getsize(rendered_debug_wav) > 1000
+                    and os.path.exists(report_json)
+                )
+
+                if use_cache:
                     import shutil
+                    print(f"  {Color.cyan('[CACHE]')} Reusing existing ADSync warped audio: {rendered_debug_wav}", flush=True)
+                    shutil.copyfile(rendered_debug_wav, raw_stitched_wav)
+                    sync_params[name]["engine_used"] = "adsync"
+                else:
+                    try:
+                        import adsync._pipeline as ad_pipe
+                        import adsync.config as ad_conf
+                        from pathlib import Path
+                        import shutil
 
-                    cfg = ad_conf.SyncConfig(
-                        mode="warp",
-                        speed_detect=not no_speed_detect,
-                        fingerprint=True,
-                        crossfade_ms=50,
-                        output_sr=48000,
-                        analysis_sr=16000,
-                        multiband=not no_multiband,
-                    )
+                        cfg = ad_conf.SyncConfig(
+                            mode="warp",
+                            speed_detect=not no_speed_detect,
+                            fingerprint=True,
+                            crossfade_ms=50,
+                            output_sr=48000,
+                            analysis_sr=16000,
+                            multiband=not no_multiband,
+                        )
 
-                    report = ad_pipe.run_pipeline(
-                        video_path=Path(ref_path),
-                        ad_path=Path(path),
-                        output_path=None,
-                        config=cfg,
-                        debug_dir=Path(adsync_scratch),
-                        mux=False,
-                    )
+                        report = ad_pipe.run_pipeline(
+                            video_path=Path(ref_path),
+                            ad_path=Path(path),
+                            output_path=None,
+                            config=cfg,
+                            debug_dir=Path(adsync_scratch),
+                            mux=False,
+                        )
 
-                    rendered_debug_wav = os.path.join(adsync_scratch, "synced_ad.wav")
-                    if os.path.exists(rendered_debug_wav):
-                        shutil.copyfile(rendered_debug_wav, raw_stitched_wav)
-                        sync_params[name]["report"] = report
-                        sync_params[name]["engine_used"] = "adsync"
-                        try:
-                            with open(os.path.join(adsync_scratch, "report.json"), "w", encoding="utf-8") as f:
-                                f.write(report.model_dump_json(indent=2))
-                        except Exception:
-                            pass
-                        try:
-                            from adsync.report.json_report import print_summary as adsync_print_summary
-                            adsync_print_summary(report)
-                        except Exception:
-                            pass
-                        print(f"  {Color.success('[SUCCESS]')} ADSync Viterbi Warp rendered successfully! (Confidence: {Color.bold(f'{report.confidence*100:.1f}%')})", flush=True)
-                    else:
-                        raise RuntimeError("ADSync did not output synced_ad.wav")
-                except Exception as e:
-                    print(f"  {Color.warn('[WARN]')} ADSync native engine encountered issue ({e}). Falling back to DescribeAlign DTW...", flush=True)
-                    engine_used = "describealign"
+                        if os.path.exists(rendered_debug_wav):
+                            shutil.copyfile(rendered_debug_wav, raw_stitched_wav)
+                            sync_params[name]["report"] = report
+                            sync_params[name]["engine_used"] = "adsync"
+                            try:
+                                with open(os.path.join(adsync_scratch, "report.json"), "w", encoding="utf-8") as f:
+                                    f.write(report.model_dump_json(indent=2))
+                            except Exception:
+                                pass
+                            try:
+                                from adsync.report.json_report import print_summary as adsync_print_summary
+                                adsync_print_summary(report)
+                            except Exception:
+                                pass
+                            print(f"  {Color.success('[SUCCESS]')} ADSync Viterbi Warp rendered successfully! (Confidence: {Color.bold(f'{report.confidence*100:.1f}%')})", flush=True)
+                        else:
+                            raise RuntimeError("ADSync did not output synced_ad.wav")
+                    except Exception as e:
+                        print(f"  {Color.warn('[WARN]')} ADSync native engine encountered issue ({e}). Falling back to DescribeAlign DTW...", flush=True)
+                        engine_used = "describealign"
 
             if engine_used == "describealign":
                 print(
@@ -1619,17 +1649,6 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                     # Check intro gap (if movie starts before first AD warp point)
                     if cuts[0]["vid_start"] >= 0.20:
                         explicit_gaps.append((0.0, cuts[0]["vid_start"], cuts[0]["vid_start"]))
-
-                    for i in range(len(cuts) - 1):
-                        c1 = cuts[i]
-                        c2 = cuts[i + 1]
-                        g_start = c1["vid_end"]
-                        g_end = c2["vid_start"]
-                        dst_gap = g_end - g_start
-                        # An excised scene void occurs when there is an unrendered time hole in video (gap >= 150ms)
-                        if dst_gap >= 0.15:
-                            explicit_gaps.append((g_start, g_end, dst_gap))
-
                     # Check outro gap (if movie ends after last AD warp point)
                     if (target_duration - cuts[-1]["vid_end"]) >= 0.50:
                         explicit_gaps.append((cuts[-1]["vid_end"], target_duration, target_duration - cuts[-1]["vid_end"]))
