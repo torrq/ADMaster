@@ -820,12 +820,13 @@ def compute_sync_parameters(ffmpeg_bin, ffprobe_bin, base_path, ad_tracks, targe
         else:
             print(f"  [{name}] Native rate (1.000000x) enforced.", flush=True)
 
-        # 1. Consensus Quorum Check: A single isolated anchor (e.g. 1/100 or < 3% of timeline)
-        # without overwhelming peak confidence (>= 0.40) is acoustic
-        # noise/false-positive, not consensus.
-        min_quorum = max(3, int(len(measurements) * 0.03))
+        # 1. Consensus Quorum Check: A single isolated anchor or tiny cluster (< 5 anchors or < 5% of timeline)
+        # without overwhelming peak confidence (>= 0.40) is acoustic noise/false-positive, not consensus.
+        min_quorum = max(5, int(len(measurements) * 0.05))
         has_insufficient_quorum = (
-            winner_count < min_quorum and best_overall_confidence < 0.40)
+            (winner_count < min_quorum and best_overall_confidence < 0.40) or
+            (winner_count < max(8, int(len(measurements) * 0.08)) and best_overall_confidence < 0.25)
+        )
 
         # 2. Drifting Multi-Cluster Check: Distinct offset clusters with
         # significant delta (> 0.20s)
@@ -1224,9 +1225,12 @@ def fill_master_audio_gaps(
     if master_audio.ndim == 1:
         master_audio = np.column_stack((master_audio, master_audio))
 
-    target_len = min(len(ad_audio), len(master_audio))
-    ad_audio = ad_audio[:target_len]
-    master_audio = master_audio[:target_len]
+    if len(ad_audio) < len(master_audio):
+        pad_len = len(master_audio) - len(ad_audio)
+        ad_audio = np.pad(ad_audio, ((0, pad_len), (0, 0)), mode="constant")
+    elif len(ad_audio) > len(master_audio):
+        ad_audio = ad_audio[:len(master_audio)]
+    target_len = len(master_audio)
 
     fade_len = int(sr * (crossfade_ms / 1000.0))
     t_fade = np.linspace(0, np.pi / 2, fade_len)
@@ -1685,6 +1689,36 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
             print(
                 f"  Error pre-rendering AD WAV: {res_wav.stderr}", flush=True)
             continue
+
+        # Ensure single-offset WAV matches video target duration (fill end credits or truncate overshoots)
+        if os.path.exists(temp_wav) and os.path.getsize(temp_wav) > 1000:
+            _, _, ad_wav_dur = get_audio_info(ffprobe_bin, temp_wav)
+            if ad_wav_dur and ad_wav_dur < render_duration - 3.0 and not no_gap_fill:
+                credit_gap = [(ad_wav_dur, render_duration, render_duration - ad_wav_dur)]
+                _, ref_channels, _ = get_audio_info(ffprobe_bin, ref_path, ref_stream_map)
+                fill_master_audio_gaps(
+                    ffmpeg_bin=ffmpeg_bin,
+                    ad_wav_path=temp_wav,
+                    ref_path=ref_path,
+                    ref_stream_map=ref_stream_map,
+                    channels=ref_channels or 2,
+                    scratch_dir=scratch_dir,
+                    threads=threads,
+                    explicit_gaps=credit_gap,
+                    crossfade_ms=50,
+                )
+                sync_params[name]["explicit_gaps"] = credit_gap
+            elif ad_wav_dur and ad_wav_dur > render_duration + 1.0:
+                truncated_wav = temp_wav.replace(".wav", "_trunc.wav")
+                cmd_trunc = [
+                    ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "fatal",
+                    "-threads", str(threads), "-i", temp_wav,
+                    "-t", f"{render_duration:.3f}",
+                    "-c:a", "pcm_s16le", truncated_wav
+                ]
+                res_trunc = subprocess.run(cmd_trunc)
+                if res_trunc.returncode == 0 and os.path.exists(truncated_wav):
+                    os.replace(truncated_wav, temp_wav)
 
         # Standard Stereo AAC from clean WAV
         print(f"  Encoding AD Stereo AAC 2.0 (alimiter)...", flush=True)
