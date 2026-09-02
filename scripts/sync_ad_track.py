@@ -1692,7 +1692,7 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
 
         # Ensure single-offset WAV matches video target duration (fill end credits or truncate overshoots)
         if os.path.exists(temp_wav) and os.path.getsize(temp_wav) > 1000:
-            _, _, ad_wav_dur = get_audio_info(ffprobe_bin, temp_wav)
+            ad_wav_dur, _, _ = get_audio_info(ffprobe_bin, temp_wav)
             if ad_wav_dur and ad_wav_dur < render_duration - 3.0 and not no_gap_fill:
                 credit_gap = [(ad_wav_dur, render_duration, render_duration - ad_wav_dur)]
                 _, ref_channels, _ = get_audio_info(ffprobe_bin, ref_path, ref_stream_map)
