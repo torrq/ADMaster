@@ -203,9 +203,11 @@ class TeeLogger:
 
 def format_time_code(seconds: float) -> str:
     """Format duration in seconds to standard HH:MM:SS.mmm timecode string."""
+    sign = "-" if seconds < 0 else ""
+    seconds = abs(seconds)
     m, s = divmod(seconds, 60)
     h, m = divmod(int(m), 60)
-    return f"{h:02d}:{m:02d}:{s:06.3f}" if h else f"00:{m:02d}:{s:06.3f}"
+    return f"{sign}{h:02d}:{m:02d}:{s:06.3f}" if h else f"{sign}00:{m:02d}:{s:06.3f}"
 
 
 def extract_warp_cuts(params, scratch_dir=None, name=None, jump_threshold=0.20):
@@ -254,7 +256,7 @@ def extract_warp_cuts(params, scratch_dir=None, name=None, jump_threshold=0.20):
             if idx == 0:
                 cuts.append({
                     "index": 1,
-                    "vid_start": r["vid_start"],
+                    "vid_start": max(0.0, r["vid_start"]),
                     "vid_end": r["vid_end"],
                     "offset": r["offset"],
                     "jump": 0.0,
@@ -435,6 +437,18 @@ def locate_binaries(ffmpeg_path):
     else:
         ffmpeg_path = shutil.which("ffmpeg") or "ffmpeg"
         ffprobe_path = shutil.which("ffprobe") or "ffprobe"
+
+    # Prepend discovered binary directories to PATH so subprocesses and external
+    # packages (such as ADSync) that rely on shutil.which can find them.
+    for b in (ffmpeg_path, ffprobe_path):
+        if b and os.path.isabs(b):
+            b_dir = os.path.dirname(b)
+            if os.path.isdir(b_dir):
+                current_path = os.environ.get("PATH", "")
+                parts = current_path.split(os.pathsep)
+                if b_dir not in parts:
+                    os.environ["PATH"] = b_dir + os.pathsep + current_path
+
     return ffmpeg_path, ffprobe_path
 
 
@@ -612,6 +626,35 @@ def compute_sync_parameters(ffmpeg_bin, ffprobe_bin, base_path, ad_tracks, targe
         "\n=== COMPUTING ACOUSTIC CROSS-CORRELATION SYNC PARAMETERS ===",
         flush=True)
 
+    sync_cache_file = os.path.join(scratch_dir, "sync_params.json")
+    cached_sync = {}
+    if os.path.exists(sync_cache_file):
+        try:
+            with open(sync_cache_file, "r", encoding="utf-8") as f:
+                cached_sync = json.load(f)
+        except Exception:
+            cached_sync = {}
+
+    tracks_to_compute = {}
+    sync_results = {}
+    for name, path in ad_tracks.items():
+        if name in cached_sync and isinstance(cached_sync[name], dict) and "offset" in cached_sync[name]:
+            c_entry = cached_sync[name]
+            if force_dtw and c_entry.get("method") != "dtw":
+                tracks_to_compute[name] = path
+            else:
+                sync_results[name] = c_entry
+                print(
+                    f"  {Color.cyan('[CACHE]')} Reusing cached sync parameters from scratch for {Color.track(name)}: "
+                    f"offset={c_entry['offset']:+.3f}s | atempo={c_entry.get('atempo', 1.0):.6f} | "
+                    f"conf={c_entry.get('confidence', 1.0) * 100:.1f}% | method={c_entry.get('method', 'cross_correlation').upper()}",
+                    flush=True)
+        else:
+            tracks_to_compute[name] = path
+
+    if not tracks_to_compute:
+        return sync_results
+
     anchor_times = np.linspace(
         target_duration * 0.05,
         target_duration * 0.88,
@@ -624,7 +667,6 @@ def compute_sync_parameters(ffmpeg_bin, ffprobe_bin, base_path, ad_tracks, targe
                 num_anchors *
                 60):.1f} mins).",
         flush=True)
-    sync_results = {}
 
     # Pre-decode reference audio ONCE
     base_mono_wav = predecode_to_mono_8k(
@@ -636,7 +678,7 @@ def compute_sync_parameters(ffmpeg_bin, ffprobe_bin, base_path, ad_tracks, targe
     base_all_samples = read_wav_samples(base_mono_wav)
     sr = 8000
 
-    for name, path in ad_tracks.items():
+    for name, path in tracks_to_compute.items():
         _, _, ad_sr = get_audio_info(ffprobe_bin, path)
         is_pal_track = (force_pal or ("uk" in name.lower(
         ) or "pal" in name.lower() or "25fps" in name.lower())) and not no_pal
@@ -662,7 +704,7 @@ def compute_sync_parameters(ffmpeg_bin, ffprobe_bin, base_path, ad_tracks, targe
                     )
                     if is_detected_pal:
                         print(
-                            f"  [SPEED PROBE] Acoustic landmark probe detected PAL speed transfer (stretch ×{speed_ratio:.4f}) for [{name}]!",
+                            f"  [SPEED PROBE] Acoustic landmark probe detected PAL speed transfer (stretch x{speed_ratio:.4f}) for [{name}]!",
                             flush=True)
                         is_pal_track = True
 
@@ -893,12 +935,21 @@ def compute_sync_parameters(ffmpeg_bin, ffprobe_bin, base_path, ad_tracks, targe
                     break
         print("", flush=True)
 
+    try:
+        cached_sync.update(sync_results)
+        with open(sync_cache_file, "w", encoding="utf-8") as f:
+            json.dump(cached_sync, f, indent=2)
+    except Exception as e:
+        if debug:
+            print(f"  [DEBUG] Failed to write sync_params.json: {e}", flush=True)
+
     return sync_results
 
 
 def render_main_tracks(ffmpeg_bin, ref_path, base_title, out_dir, scratch_dir, channels, stream_map=None,
-                       preview_sec=None, threads=2, keep_scratch=False, overwrite=False, no_night=False):
-    """Renders standard converted formats for Main Audio (Surround AC3, Stereo AAC 2.0, Night Mode AAC 2.0).
+                       preview_sec=None, threads=2, keep_scratch=False, overwrite=False, no_night=False,
+                       stereo_only=False, wav=False):
+    """Renders standard converted formats for Main Audio (Surround AC3, Stereo AAC 2.0 / WAV, Night Mode AAC 2.0 / WAV).
     Enforces strict ITU-R BS.775 2.0 downmixing and -ac 2."""
     print("\n=== RENDERING MAIN AUDIO TRACKS ===", flush=True)
     os.makedirs(out_dir, exist_ok=True)
@@ -907,8 +958,8 @@ def render_main_tracks(ffmpeg_bin, ref_path, base_title, out_dir, scratch_dir, c
     suffix = f" (Preview {int(preview_sec)}s)" if preview_sec else ""
     pan_stereo = "pan=stereo|c0=c0+0.7071*c2+0.7071*c4|c1=c1+0.7071*c2+0.7071*c5"
 
-    # 1. Surround 5.1 AC3 (if 6+ channels)
-    if channels >= 6:
+    # 1. Surround 5.1 AC3 (if 6+ channels and not stereo_only)
+    if channels >= 6 and not stereo_only:
         out_surround = os.path.join(
             out_dir, f"{base_title} (Surround){suffix}.ac3")
         if os.path.exists(out_surround) and os.path.getsize(
@@ -948,8 +999,11 @@ def render_main_tracks(ffmpeg_bin, ref_path, base_title, out_dir, scratch_dir, c
             else:
                 print(f"  [SUCCESS] Saved: {out_surround}", flush=True)
 
-    out_stereo = os.path.join(out_dir, f"{base_title} (Stereo){suffix}.m4a")
-    out_night = os.path.join(out_dir, f"{base_title} (Night Mode){suffix}.m4a")
+    ext = ".wav" if wav else ".m4a"
+    codec_label = "WAV PCM" if wav else "AAC 2.0"
+    codec_args = ["-c:a", "pcm_s16le"] if wav else ["-c:a", "aac", "-b:a", "256k"]
+    out_stereo = os.path.join(out_dir, f"{base_title} (Stereo){suffix}{ext}")
+    out_night = os.path.join(out_dir, f"{base_title} (Night Mode){suffix}{ext}")
 
     stereo_exists = os.path.exists(
         out_stereo) and os.path.getsize(out_stereo) > 1000
@@ -958,7 +1012,7 @@ def render_main_tracks(ffmpeg_bin, ref_path, base_title, out_dir, scratch_dir, c
 
     if stereo_exists and night_exists and not overwrite:
         print(
-            f"  [SKIP] Main Stereo & Night Mode AAC already exist in output/ (use --overwrite to force re-render):",
+            f"  [SKIP] Main Stereo & Night Mode {codec_label} already exist in output/ (use --overwrite to force re-render):",
             flush=True)
         print(
             f"    [OK] {
@@ -1028,15 +1082,15 @@ def render_main_tracks(ffmpeg_bin, ref_path, base_title, out_dir, scratch_dir, c
             flush=True)
         return
 
-    # 3. Standard Stereo AAC 2.0 from stereo WAV
+    # 3. Standard Stereo from stereo WAV
     if stereo_exists and not overwrite:
         print(
-            f"  [SKIP] Main Stereo AAC already exists: {
+            f"  [SKIP] Main Stereo {codec_label} already exists: {
                 os.path.basename(out_stereo)}",
             flush=True)
     else:
         print(
-            f"  Encoding Main Stereo AAC 2.0 (alimiter, full dynamic range)...",
+            f"  Encoding Main Stereo {codec_label} (alimiter, full dynamic range)...",
             flush=True)
         cmd_stereo = [
             ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "fatal", "-threads", str(
@@ -1044,7 +1098,7 @@ def render_main_tracks(ffmpeg_bin, ref_path, base_title, out_dir, scratch_dir, c
             "-i", stereo_wav,
             "-af", "alimiter=level_in=1:level_out=0.98:limit=0.98",
             "-ac", "2", "-ar", "48000",
-            "-c:a", "aac", "-b:a", "256k", out_stereo
+            *codec_args, out_stereo
         ]
         res_stereo = subprocess.run(
             cmd_stereo,
@@ -1056,17 +1110,17 @@ def render_main_tracks(ffmpeg_bin, ref_path, base_title, out_dir, scratch_dir, c
         else:
             print(f"  Error rendering stereo: {res_stereo.stderr}", flush=True)
 
-    # 4. Night Mode AAC 2.0 from stereo WAV
+    # 4. Night Mode from stereo WAV
     if no_night:
         pass
     elif night_exists and not overwrite:
         print(
-            f"  [SKIP] Main Night Mode AAC already exists: {
+            f"  [SKIP] Main Night Mode {codec_label} already exists: {
                 os.path.basename(out_night)}",
             flush=True)
     else:
         print(
-            f"  Encoding Main Night Mode AAC 2.0 (loudnorm -16 LUFS)...",
+            f"  Encoding Main Night Mode {codec_label} (loudnorm -16 LUFS)...",
             flush=True)
         cmd_night = [
             ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "fatal", "-threads", str(
@@ -1074,7 +1128,7 @@ def render_main_tracks(ffmpeg_bin, ref_path, base_title, out_dir, scratch_dir, c
             "-i", stereo_wav,
             "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
             "-ac", "2", "-ar", "48000",
-            "-c:a", "aac", "-b:a", "256k", out_night
+            *codec_args, out_night
         ]
         res_night = subprocess.run(
             cmd_night,
@@ -1084,10 +1138,7 @@ def render_main_tracks(ffmpeg_bin, ref_path, base_title, out_dir, scratch_dir, c
         if res_night.returncode == 0:
             print(f"  [SUCCESS] Saved: {out_night}", flush=True)
         else:
-            print(
-                f"  Error rendering night mode: {
-                    res_night.stderr}",
-                flush=True)
+            print(f"  Error rendering night mode: {res_night.stderr}", flush=True)
 
     # 5. Clean up intermediate WAV
     if not keep_scratch and os.path.exists(stereo_wav):
@@ -1127,6 +1178,86 @@ def mux_video_sample(ffmpeg_bin, video_src, audio_src,
             flush=True)
     else:
         print(f"  Warning: MKV Video Muxing failed: {res.stderr}", flush=True)
+
+
+def mux_final_mkv(ref_mkv, main_stereo, ad_tracks_stereo, out_mkv, stereo_only=False, overwrite=False):
+    """Multiplexes reference video, downmixed main stereo, and synced AD stereo tracks into an MKV using mkvmerge."""
+    if os.path.exists(out_mkv) and os.path.getsize(out_mkv) > 1000 and not overwrite:
+        print(f"  [SKIP] Final MKV already exists: {os.path.basename(out_mkv)} (use --overwrite to force)", flush=True)
+        return True
+
+    mkvmerge_bin = locate_mkvtoolnix("mkvmerge")
+    if not mkvmerge_bin or not os.path.exists(mkvmerge_bin):
+        print("  [ERROR] mkvmerge binary not found for multiplexing!", flush=True)
+        return False
+
+    print(f"\n=== MULTIPLEXING FINAL MKV ===", flush=True)
+    print(f"  Output: {out_mkv}", flush=True)
+
+    cmd_probe = [mkvmerge_bin, "-J", ref_mkv]
+    res_probe = subprocess.run(cmd_probe, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    video_ids = []
+    eng_sub_ids = []
+    if res_probe.returncode == 0:
+        try:
+            info = json.loads(res_probe.stdout)
+            for t in info.get("tracks", []):
+                t_type = t.get("type")
+                t_id = t.get("id")
+                props = t.get("properties", {})
+                lang = props.get("language", "").lower()
+                lang_ietf = props.get("language_ietf", "").lower()
+                if t_type == "video":
+                    video_ids.append(t_id)
+                elif t_type == "subtitles":
+                    if lang in ["eng", "en"] or lang_ietf.startswith("en"):
+                        eng_sub_ids.append(t_id)
+        except Exception as e:
+            print(f"  [WARN] Failed to parse MKV tracks: {e}", flush=True)
+
+    cmd_mux = [mkvmerge_bin, "-o", out_mkv, "--no-audio"]
+    if eng_sub_ids:
+        cmd_mux.extend(["--stracks", ",".join(str(i) for i in eng_sub_ids)])
+    elif res_probe.returncode == 0:
+        cmd_mux.append("--no-subtitles")
+    cmd_mux.append(ref_mkv)
+
+    # Main stereo track
+    cmd_mux.extend([
+        "--track-name", "0:Main, Stereo",
+        "--language", "0:eng",
+        "--default-track-flag", "0:yes",
+        main_stereo
+    ])
+
+    # AD stereo track(s)
+    for ad_path in ad_tracks_stereo:
+        cmd_mux.extend([
+            "--track-name", "0:AD, Stereo",
+            "--language", "0:eng",
+            "--default-track-flag", "0:no",
+            "--visual-impaired-flag", "0:yes",
+            ad_path
+        ])
+
+    # Enforce standard track order: video(s), main stereo, ad stereo(s), subtitles
+    if video_ids:
+        track_order = [f"0:{vid}" for vid in video_ids]
+        track_order.append("1:0")
+        for idx in range(len(ad_tracks_stereo)):
+            track_order.append(f"{idx + 2}:0")
+        for sid in eng_sub_ids:
+            track_order.append(f"0:{sid}")
+        cmd_mux.extend(["--track-order", ",".join(track_order)])
+
+    res_mux = subprocess.run(cmd_mux, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if res_mux.returncode in [0, 1] and os.path.exists(out_mkv) and os.path.getsize(out_mkv) > 1000:
+        size_mb = os.path.getsize(out_mkv) / (1024 * 1024)
+        print(f"  [SUCCESS] Saved Final MKV: {out_mkv} ({size_mb:.1f} MB)", flush=True)
+        return True
+    else:
+        print(f"  [ERROR] MKV multiplexing failed: {res_mux.stderr}", flush=True)
+        return False
 
 
 def extract_master_stereo_wav(
@@ -1172,7 +1303,7 @@ def fill_master_audio_gaps(
     threads: int = 2,
     explicit_gaps: list[tuple[float, float, float]] = None,
     crossfade_ms: int = 50,
-    scan_silent_voids: bool = True,
+    scan_silent_voids: bool = False,
 ) -> tuple[int, list[tuple[float, float, float]]]:
     """
     Splices volume-matched Reference Master Audio with equal-power cosine crossfades
@@ -1226,7 +1357,7 @@ def fill_master_audio_gaps(
 
     all_gaps = list(explicit_gaps or [])
 
-    # Automated silent hole detection: scan downsampled audio for voids >= 300ms
+    # Automated silent hole detection: scan downsampled audio for voids >= 1.5s
     if scan_silent_voids and len(ad_audio) > 0 and len(master_audio) > 0:
         downsample_factor = 16
         sr_down = sr // downsample_factor
@@ -1257,13 +1388,13 @@ def fill_master_audio_gaps(
                     t_start = (h_start * frame_len) / sr_down
                     t_end = (i * frame_len) / sr_down
                     dur = t_end - t_start
-                    if dur >= 0.30:
+                    if dur >= 1.50:
                         all_gaps.append((t_start, t_end, dur))
             if in_hole:
                 t_start = (h_start * frame_len) / sr_down
                 t_end = (len(is_hole) * frame_len) / sr_down
                 dur = t_end - t_start
-                if dur >= 0.30:
+                if dur >= 1.50:
                     all_gaps.append((t_start, t_end, dur))
 
     if not all_gaps:
@@ -1282,63 +1413,166 @@ def fill_master_audio_gaps(
                 merged.append([s, e])
     raw_gaps = [(s, e, e - s) for s, e in merged if (e - s) >= 0.10]
 
-    # Safeguard: Never overwrite active AD audio/narration with master reference audio!
-    # If the region already contains non-silent AD audio (RMS >= 0.003), preserve the AD narration.
+    # Identify true silent voids within candidate gap intervals.
+    # Rather than discarding an entire gap interval if speech touches its outer boundaries,
+    # we isolate the contiguous sub-intervals where AD narration is silent (peak < 0.015, rms < 0.003)
+    # and master soundtrack audio is active (ref_rms >= 0.0005).
     safe_gaps = []
+    win_size = int(0.05 * sr)  # 50ms analysis window
     for s, e, d in raw_gaps:
         start_idx = int(s * sr)
         end_idx = min(int(e * sr), target_len)
         if end_idx <= start_idx:
             continue
         ad_region = ad_audio[start_idx:end_idx]
-        ad_reg_rms = float(np.sqrt(np.mean(ad_region**2)))
-        if ad_reg_rms >= 0.003:
-            # Active AD audio / speech present - skip to protect narration!
+        ref_region = master_audio[start_idx:end_idx]
+        if len(ad_region) < win_size:
             continue
-        safe_gaps.append((s, e, d))
-    gaps = safe_gaps
 
+        n_wins = len(ad_region) // win_size
+        win_chunks = ad_region[:n_wins * win_size].reshape(n_wins, win_size, -1)
+        win_rms = np.sqrt(np.mean(win_chunks**2, axis=(1, 2)))
+        win_peak = np.max(np.abs(win_chunks), axis=(1, 2))
+
+        ref_chunks = ref_region[:n_wins * win_size].reshape(n_wins, win_size, -1)
+        ref_win_rms = np.sqrt(np.mean(ref_chunks**2, axis=(1, 2)))
+
+        is_silent = (win_peak < 0.015) & (win_rms < 0.003) & (ref_win_rms >= 0.0005)
+
+        in_void = False
+        v_start = 0
+        for i in range(len(is_silent)):
+            if is_silent[i] and not in_void:
+                in_void = True
+                v_start = i
+            elif not is_silent[i] and in_void:
+                in_void = False
+                sub_s = s + (v_start * win_size) / sr
+                sub_e = s + (i * win_size) / sr
+                sub_d = sub_e - sub_s
+                if sub_d >= 0.40:
+                    safe_gaps.append((sub_s, sub_e, sub_d))
+        if in_void:
+            sub_s = s + (v_start * win_size) / sr
+            sub_e = s + (len(is_silent) * win_size) / sr
+            sub_d = sub_e - sub_s
+            if sub_d >= 0.40:
+                safe_gaps.append((sub_s, sub_e, sub_d))
+
+    gaps = safe_gaps
     if not gaps:
         return 0, []
 
-    print(f"\n  [GAP FILL] Splicing Reference Master Audio into {len(gaps)} missing scene / audio hole gap(s):", flush=True)
+    fade_len = int(sr * (crossfade_ms / 1000.0))
+    t_fade = np.linspace(0, np.pi / 2, fade_len, dtype=np.float32)
+    fade_in = np.sin(t_fade)[:, np.newaxis]
+    fade_out = np.cos(t_fade)[:, np.newaxis]
+
+    # Compute track-wide baseline gain between AD audio and Master audio
+    sample_step = sr * 20
+    gain_samples = []
+    max_scan_len = min(len(ad_audio), len(master_audio))
+    for p in range(sr * 30, max_scan_len - sr * 30, sample_step):
+        c_ad = ad_audio[p:p + sr * 2]
+        c_ref = master_audio[p:p + sr * 2]
+        r_ad = float(np.sqrt(np.mean(c_ad**2)))
+        r_ref = float(np.sqrt(np.mean(c_ref**2)))
+        if r_ref > 0.003 and r_ad > 0.005:
+            gain_samples.append(r_ad / r_ref)
+    global_gain = float(np.median(gain_samples)) if gain_samples else 1.0
+
+    def measure_region_gain(ad_region, ref_region, default_gain):
+        if len(ad_region) < win_size or len(ref_region) < win_size:
+            return default_gain
+        nw = min(len(ad_region), len(ref_region)) // win_size
+        cad = ad_region[:nw * win_size].reshape(nw, win_size, -1)
+        cref = ref_region[:nw * win_size].reshape(nw, win_size, -1)
+        rad = np.sqrt(np.mean(cad**2, axis=(1, 2)))
+        rref = np.sqrt(np.mean(cref**2, axis=(1, 2)))
+        valid = (rref > 0.001) & (rad > 0.002)
+        if np.sum(valid) < 3:
+            return default_gain
+        ratio_local = float(np.percentile(rad[valid], 30) / np.percentile(rref[valid], 30))
+        # Blend local background ratio with global gain (65% local, 35% global)
+        ratio_blended = 0.65 * ratio_local + 0.35 * default_gain
+        return float(np.clip(ratio_blended, 0.4 * default_gain, 2.5 * default_gain))
+
+    print(f"\n  [GAP FILL] Splicing Level-Matched Reference Master Audio into {len(gaps)} missing scene void(s):", flush=True)
     for s, e, d in gaps:
+        start_idx = int(s * sr)
+        end_idx = min(int(e * sr), target_len)
+        gap_samples = end_idx - start_idx
+        if gap_samples <= 0:
+            continue
+
+        # Dynamic Level Matching: Measure neighboring AD vs Master levels to eliminate volume jump at cuts
+        neighbor_samples = int(4.0 * sr)
+        pre_start = max(0, start_idx - neighbor_samples)
+        ad_pre = ad_audio[pre_start:start_idx]
+        ref_pre = master_audio[pre_start:start_idx]
+
+        post_end = min(target_len, end_idx + neighbor_samples)
+        ad_post = ad_audio[end_idx:post_end]
+        ref_post = master_audio[end_idx:post_end]
+
+        g_start = measure_region_gain(ad_pre, ref_pre, global_gain)
+        g_end = measure_region_gain(ad_post, ref_post, global_gain)
+
+        if start_idx == 0:
+            g_start = g_end
+        if end_idx >= target_len:
+            g_end = g_start
+
+        # Smooth linear gain interpolation across the gap duration
+        gain_curve = np.linspace(g_start, g_end, gap_samples, dtype=np.float32)[:, np.newaxis]
+        scaled_master = master_audio[start_idx:end_idx] * gain_curve
+
+        # Soft peak clamp to prevent clipping
+        peak = float(np.max(np.abs(scaled_master)))
+        if peak > 0.98:
+            scaled_master = (scaled_master / peak) * 0.98
+
         m_s, sec_s = divmod(int(s), 60)
         h_s, m_s = divmod(m_s, 60)
         m_e, sec_e = divmod(int(e), 60)
         h_e, m_e = divmod(m_e, 60)
-        print(f"    - Excised Scene Void: {h_s:02d}:{m_s:02d}:{sec_s:02d} -> {h_e:02d}:{m_e:02d}:{sec_e:02d} ({d:.1f}s)", flush=True)
+        db_s = 20 * np.log10(g_start)
+        db_e = 20 * np.log10(g_end)
+        print(f"    - Excised Scene Void: {h_s:02d}:{m_s:02d}:{sec_s:02d} -> {h_e:02d}:{m_e:02d}:{sec_e:02d} ({d:.1f}s) | Matched Gain: {g_start:.2f}x ({db_s:+.1f}dB) -> {g_end:.2f}x ({db_e:+.1f}dB)", flush=True)
 
-    fade_len = int(sr * (crossfade_ms / 1000.0))
-    t_fade = np.linspace(0, np.pi / 2, fade_len)
-    fade_in = np.sin(t_fade)[:, np.newaxis]
-    fade_out = np.cos(t_fade)[:, np.newaxis]
-
-    for s, e, d in gaps:
-        start_idx = int(s * sr)
-        end_idx = min(int(e * sr), target_len)
-
-        if end_idx <= start_idx + 2 * fade_len:
-            ad_audio[start_idx:end_idx] = master_audio[start_idx:end_idx]
-            continue
-
-        # Intro boundary
-        if start_idx == 0:
-            ad_audio[0:end_idx - fade_len] = master_audio[0:end_idx - fade_len]
-        else:
-            ad_audio[start_idx:start_idx + fade_len] = (
-                ad_audio[start_idx:start_idx + fade_len] * fade_out +
-                master_audio[start_idx:start_idx + fade_len] * fade_in
+        # Crossfade intro boundary: overlap crossfade before start_idx
+        if start_idx >= fade_len:
+            scaled_pre = master_audio[start_idx - fade_len:start_idx] * g_start
+            ad_audio[start_idx - fade_len:start_idx] = (
+                ad_audio[start_idx - fade_len:start_idx] * fade_out +
+                scaled_pre * fade_in
             )
-            ad_audio[start_idx + fade_len:end_idx - fade_len] = master_audio[start_idx + fade_len:end_idx - fade_len]
+        elif start_idx > 0:
+            act_fade = start_idx
+            t_act = np.linspace(0, np.pi / 2, act_fade, dtype=np.float32)
+            scaled_pre = master_audio[0:start_idx] * g_start
+            ad_audio[0:start_idx] = (
+                ad_audio[0:start_idx] * np.cos(t_act)[:, np.newaxis] +
+                scaled_pre * np.sin(t_act)[:, np.newaxis]
+            )
 
-        # Outro boundary
-        if end_idx >= target_len:
-            ad_audio[start_idx + fade_len:target_len] = master_audio[start_idx + fade_len:target_len]
-        else:
-            ad_audio[end_idx - fade_len:end_idx] = (
-                master_audio[end_idx - fade_len:end_idx] * fade_out +
-                ad_audio[end_idx - fade_len:end_idx] * fade_in
+        # Spliced master audio across void
+        ad_audio[start_idx:end_idx] = scaled_master
+
+        # Crossfade outro boundary: overlap crossfade after end_idx
+        if end_idx + fade_len <= target_len:
+            scaled_post = master_audio[end_idx:end_idx + fade_len] * g_end
+            ad_audio[end_idx:end_idx + fade_len] = (
+                scaled_post * fade_out +
+                ad_audio[end_idx:end_idx + fade_len] * fade_in
+            )
+        elif end_idx < target_len:
+            act_fade = target_len - end_idx
+            t_act = np.linspace(0, np.pi / 2, act_fade, dtype=np.float32)
+            scaled_post = master_audio[end_idx:target_len] * g_end
+            ad_audio[end_idx:target_len] = (
+                scaled_post * np.cos(t_act)[:, np.newaxis] +
+                ad_audio[end_idx:target_len] * np.sin(t_act)[:, np.newaxis]
             )
 
     tmp_out = ad_wav_path.replace(".wav", "_gapfilled_tmp.wav")
@@ -1350,8 +1584,8 @@ def fill_master_audio_gaps(
 
 def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, sync_params, target_duration, out_dir, scratch_dir, ref_stream_map=None,
                      target_i=-16.0, target_tp=-1.5, preview_sec=None, video_mux_path=None, threads=2, keep_scratch=False, overwrite=False, no_night=False, debug=False,
-                     warp_engine="adsync", no_speed_detect=False, no_multiband=False, no_gap_fill=False, total_ad_count=None):
-    """Renders synced AD tracks: Stereo AAC (alimiter) and Night Mode AAC (loudnorm).
+                     warp_engine="adsync", no_speed_detect=False, no_multiband=False, no_gap_fill=False, total_ad_count=None, wav=False):
+    """Renders synced AD tracks: Stereo AAC/WAV (alimiter) and Night Mode AAC/WAV (loudnorm).
     Supports single-offset intermediate WAV rendering and dual-engine warp fallback (ADSync Viterbi DP / DescribeAlign DTW)."""
     print(f"\n{Color.CYAN}=== RENDERING AUDIO DESCRIPTION TRACKS ==={Color.RESET}", flush=True)
     os.makedirs(out_dir, exist_ok=True)
@@ -1369,11 +1603,15 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
         method = params.get("method", "cross_correlation")
         is_pal = params.get("is_pal", False)
 
+        ext = ".wav" if wav else ".m4a"
+        codec_name = "WAV PCM" if wav else "AAC 2.0"
+        codec_args = ["-c:a", "pcm_s16le"] if wav else ["-c:a", "aac", "-b:a", "256k"]
+
         label_prefix = f"{base_title}-AD" if tracks_count == 1 else f"{base_title}-AD [{name}]"
         out_stereo = os.path.join(
-            out_dir, f"{label_prefix} (Stereo){suffix}.m4a")
+            out_dir, f"{label_prefix} (Stereo){suffix}{ext}")
         out_night = os.path.join(
-            out_dir, f"{label_prefix} (Night Mode){suffix}.m4a")
+            out_dir, f"{label_prefix} (Night Mode){suffix}{ext}")
         out_mkv = os.path.join(
             out_dir, f"{base_title} (Sample Sync Preview {
                 int(render_duration)}s).mkv") if video_mux_path else None
@@ -1438,15 +1676,21 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                         from pathlib import Path
                         import shutil
 
-                        cfg = ad_conf.SyncConfig(
-                            mode="warp",
-                            speed_detect=not no_speed_detect,
-                            fingerprint=True,
-                            crossfade_ms=50,
-                            output_sr=48000,
-                            analysis_sr=16000,
-                            multiband=not no_multiband,
-                        )
+                        sync_kwargs = {
+                            "mode": "warp",
+                            "speed_detect": not no_speed_detect,
+                            "fingerprint": True,
+                            "crossfade_ms": 50,
+                            "output_sr": 48000,
+                            "analysis_sr": 16000,
+                            "multiband": not no_multiband,
+                        }
+                        if hasattr(ad_conf.SyncConfig, "model_fields") and "threads" in ad_conf.SyncConfig.model_fields:
+                            sync_kwargs["threads"] = threads
+                        if hasattr(ad_conf.SyncConfig, "model_fields") and "warp_discontinuity_threshold" in ad_conf.SyncConfig.model_fields:
+                            sync_kwargs["warp_discontinuity_threshold"] = 0.8
+
+                        cfg = ad_conf.SyncConfig(**sync_kwargs)
 
                         report = ad_pipe.run_pipeline(
                             video_path=Path(ref_path),
@@ -1464,11 +1708,6 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                             try:
                                 with open(os.path.join(adsync_scratch, "report.json"), "w", encoding="utf-8") as f:
                                     f.write(report.model_dump_json(indent=2))
-                            except Exception:
-                                pass
-                            try:
-                                from adsync.report.json_report import print_summary as adsync_print_summary
-                                adsync_print_summary(report)
                             except Exception:
                                 pass
                             print(f"  {Color.success('[SUCCESS]')} ADSync Viterbi Warp rendered successfully! (Confidence: {Color.bold(f'{report.confidence*100:.1f}%')})", flush=True)
@@ -1649,6 +1888,12 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                     # Check intro gap (if movie starts before first AD warp point)
                     if cuts[0]["vid_start"] >= 0.20:
                         explicit_gaps.append((0.0, cuts[0]["vid_start"], cuts[0]["vid_start"]))
+                    # Check interior gaps between segments (excised scene voids)
+                    for i in range(len(cuts) - 1):
+                        g_start = cuts[i]["vid_end"]
+                        g_end = cuts[i + 1]["vid_start"]
+                        if g_end - g_start >= 0.50:
+                            explicit_gaps.append((g_start, g_end, g_end - g_start))
                     # Check outro gap (if movie ends after last AD warp point)
                     if (target_duration - cuts[-1]["vid_end"]) >= 0.50:
                         explicit_gaps.append((cuts[-1]["vid_end"], target_duration, target_duration - cuts[-1]["vid_end"]))
@@ -1658,7 +1903,7 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                 for i in range(len(segments) - 1):
                     g_start = segments[i].get("master_end", 0.0)
                     g_end = segments[i + 1].get("master_start", 0.0)
-                    if g_end - g_start >= 0.15:
+                    if g_end - g_start >= 1.5:
                         explicit_gaps.append((g_start, g_end, g_end - g_start))
                 if (target_duration - segments[-1].get("master_end", 0.0)) >= 0.50:
                     explicit_gaps.append((segments[-1]["master_end"], target_duration, target_duration - segments[-1]["master_end"]))
@@ -1675,7 +1920,7 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                     threads=threads,
                     explicit_gaps=explicit_gaps,
                     crossfade_ms=50,
-                    scan_silent_voids=True,
+                    scan_silent_voids=False,
                 )
                 if filled_gaps:
                     sync_params[name]["explicit_gaps"] = filled_gaps
@@ -1683,7 +1928,7 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
             # Encode Standard Stereo and Night Mode deliverables from raw_stitched_wav
             if os.path.exists(raw_stitched_wav) and os.path.getsize(raw_stitched_wav) > 1000:
                 print(
-                    f"  Encoding Synced AD Stereo AAC 2.0 (alimiter)...",
+                    f"  Encoding Synced AD Stereo {codec_name} (alimiter)...",
                     flush=True)
                 cmd_stereo = [
                     ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "fatal", "-threads", str(
@@ -1691,7 +1936,7 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                     "-i", raw_stitched_wav,
                     "-af", "alimiter=level_in=1:level_out=0.98:limit=0.98",
                     "-ac", "2", "-ar", "48000",
-                    "-c:a", "aac", "-b:a", "256k", out_stereo
+                    *codec_args, out_stereo
                 ]
                 res_stereo = subprocess.run(
                     cmd_stereo, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -1704,7 +1949,7 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
 
                 if not no_night:
                     print(
-                        f"  Encoding Synced AD Night Mode AAC 2.0 (loudnorm {target_i} LUFS)...",
+                        f"  Encoding Synced AD Night Mode {codec_name} (loudnorm {target_i} LUFS)...",
                         flush=True)
                     cmd_night = [
                         ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "fatal", "-threads", str(
@@ -1712,7 +1957,7 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                         "-i", raw_stitched_wav,
                         "-af", f"loudnorm=I={target_i}:TP={target_tp}:LRA=11",
                         "-ac", "2", "-ar", "48000",
-                        "-c:a", "aac", "-b:a", "256k", out_night
+                        *codec_args, out_night
                     ]
                     res_night = subprocess.run(
                         cmd_night, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -1732,16 +1977,16 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                             except Exception:
                                 pass
 
-                    if video_mux_path and os.path.exists(video_mux_path):
-                        out_mkv = os.path.join(
-                            out_dir, f"{label_prefix} (Synced){suffix}.mkv")
-                        mux_video_sample(
-                            ffmpeg_bin,
-                            video_mux_path,
-                            out_stereo,
-                            out_mkv,
-                            render_duration)
-                    continue
+                if video_mux_path and os.path.exists(video_mux_path):
+                    out_mkv = os.path.join(
+                        out_dir, f"{label_prefix} (Synced){suffix}.mkv")
+                    mux_video_sample(
+                        ffmpeg_bin,
+                        video_mux_path,
+                        out_stereo,
+                        out_mkv,
+                        render_duration)
+                continue
 
         # Standard Cross-Correlation Single Offset Path
         temp_wav = os.path.join(scratch_dir, f"{name}_synced_temp.wav")
@@ -1805,7 +2050,7 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                     threads=threads,
                     explicit_gaps=single_gaps,
                     crossfade_ms=50,
-                    scan_silent_voids=True,
+                    scan_silent_voids=False,
                 )
                 if filled_gaps:
                     sync_params[name]["explicit_gaps"] = filled_gaps
@@ -1823,15 +2068,15 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                 if res_trunc.returncode == 0 and os.path.exists(truncated_wav):
                     os.replace(truncated_wav, temp_wav)
 
-        # Standard Stereo AAC from clean WAV
-        print(f"  Encoding AD Stereo AAC 2.0 (alimiter)...", flush=True)
+        # Standard Stereo from clean WAV
+        print(f"  Encoding AD Stereo {codec_name} (alimiter)...", flush=True)
         cmd_stereo = [
             ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "fatal", "-threads", str(
                 threads),
             "-i", temp_wav,
             "-af", "alimiter=level_in=1:level_out=0.98:limit=0.98",
             "-ac", "2", "-ar", "48000",
-            "-c:a", "aac", "-b:a", "256k", out_stereo
+            *codec_args, out_stereo
         ]
         res_stereo = subprocess.run(
             cmd_stereo,
@@ -1846,10 +2091,10 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                     res_stereo.stderr}",
                 flush=True)
 
-        # Night Mode AAC from clean WAV
+        # Night Mode from clean WAV
         if not no_night:
             print(
-                f"  Encoding AD Night Mode AAC 2.0 (loudnorm {target_i} LUFS)...",
+                f"  Encoding AD Night Mode {codec_name} (loudnorm {target_i} LUFS)...",
                 flush=True)
             cmd_night = [
                 ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "fatal", "-threads", str(
@@ -1857,7 +2102,7 @@ def render_ad_tracks(ffmpeg_bin, ffprobe_bin, ref_path, base_title, ad_tracks, s
                 "-i", temp_wav,
                 "-af", f"loudnorm=I={target_i}:TP={target_tp}:LRA=11",
                 "-ac", "2", "-ar", "48000",
-                "-c:a", "aac", "-b:a", "256k", out_night
+                *codec_args, out_night
             ]
             res_night = subprocess.run(
                 cmd_night,
@@ -1963,9 +2208,13 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
         return False
 
     if not ad_input:
-        print(
-            f"Error: No Audio Description tracks provided or found in '{target_dir}'.")
-        return False
+        if args.convert_main or getattr(args, "stereo_only", False):
+            ad_input = []
+            print(f"  {Color.info('[INFO]')} No Audio Description tracks provided or found in '{target_dir}'. Proceeding with main audio conversion (--convert-main).")
+        else:
+            print(
+                f"Error: No Audio Description tracks provided or found in '{target_dir}'.")
+            return False
 
     ref_abs = os.path.abspath(ref_path)
     ref_parent = os.path.dirname(ref_abs)
@@ -1975,25 +2224,36 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
     else:
         project_dir = target_dir if (
             target_dir and os.path.isdir(target_dir)) else ref_parent
+    project_dir = os.path.abspath(project_dir)
 
     out_dir = args.outdir if args.outdir else os.path.join(
         project_dir, "output")
     scratch_dir = args.scratch_dir if args.scratch_dir else os.path.join(
         project_dir, "scratch")
 
+    if getattr(args, "clean_scratch", False):
+        if os.path.exists(scratch_dir):
+            import shutil
+            print(f"  {Color.warn('[CLEAN]')} Wiping scratch directory for clean run: {scratch_dir}", flush=True)
+            shutil.rmtree(scratch_dir, ignore_errors=True)
+
     os.makedirs(out_dir, exist_ok=True)
     os.makedirs(scratch_dir, exist_ok=True)
 
     base_title = args.title
     if not base_title:
-        base_title = os.path.splitext(os.path.basename(ref_path))[0]
-        base_title = re.sub(
-            r'_(?:track\d+|DELAY.*)$',
-            '',
-            base_title,
-            flags=re.IGNORECASE)
-        if project_dir and len(os.path.basename(project_dir)) > 2:
-            base_title = os.path.basename(project_dir)
+        if project_dir:
+            norm_proj = os.path.abspath(project_dir)
+            p_name = os.path.basename(norm_proj)
+            if p_name and not p_name.endswith(":"):
+                base_title = p_name
+        if not base_title:
+            base_title = os.path.splitext(os.path.basename(ref_path))[0]
+            base_title = re.sub(
+                r'_(?:track\d+|DELAY.*)$',
+                '',
+                base_title,
+                flags=re.IGNORECASE)
 
     ad_tracks = {}
     for idx, item in enumerate(ad_input):
@@ -2051,9 +2311,14 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
         print(f"{Color.bold('AD Tracks Count')} : {Color.MAGENTA}{len(ad_tracks)}{Color.RESET}")
         for name, p in ad_tracks.items():
             print(f"  - {Color.track(name)}: {os.path.basename(p)}")
-        if args.convert_main:
+        if getattr(args, "stereo_only", False):
+            print(
+                f"{Color.bold('Stereo Only')}    : {Color.ok('YES')} (Downmix to True 2.0 Stereo AAC, no surround output)")
+        elif args.convert_main:
             print(
                 f"{Color.bold('Convert Main')}    : {Color.ok('YES')} (Surround AC3 + True 2.0 Stereo AAC + Night Mode AAC)")
+        if getattr(args, "mux", False):
+            print(f"{Color.bold('Mux Final MKV')}   : {Color.ok('YES')} (Video + Stereo Audio + English Subtitles)")
         if args.force_dtw:
             print(f"{Color.bold('DTW Mode')}        : {Color.warn('FORCED')} ({CONFIG.get('default_warp_engine', 'adsync').upper()} + Multilayer smooth stitch)")
         if args.no_pal:
@@ -2061,6 +2326,10 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
         elif args.pal:
             print(
                 f"{Color.bold('PAL Mode')}        : {Color.warn('FORCED')} (Dynamic sample-rate PAL 25fps -> 23.976fps slowdown)")
+        if getattr(args, "clean_scratch", False):
+            print(f"{Color.bold('Clean Scratch')}   : {Color.warn('ENABLED (--clean-scratch)')}")
+        if getattr(args, "wav", False):
+            print(f"{Color.bold('Audio Format')}    : {Color.warn('16-bit 48kHz PCM WAV (--wav)')}")
         if args.preview:
             print(f"{Color.bold('Preview Mode')}    : {Color.YELLOW}ON ({args.preview:.0f} seconds){Color.RESET}")
         print(
@@ -2074,10 +2343,11 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
         render_duration = target_duration if not args.preview else min(
             args.preview, target_duration)
         suffix = f" (Preview {int(render_duration)}s)" if args.preview else ""
+        ext = ".wav" if getattr(args, "wav", False) else ".m4a"
         expected_outputs = []
 
         if args.convert_main:
-            if channels >= 6:
+            if channels >= 6 and not getattr(args, "stereo_only", False):
                 expected_outputs.append(
                     os.path.join(
                         out_dir,
@@ -2085,12 +2355,12 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
             expected_outputs.append(
                 os.path.join(
                     out_dir,
-                    f"{base_title} (Stereo){suffix}.m4a"))
-            if not getattr(args, "no_night", False):
+                    f"{base_title} (Stereo){suffix}{ext}"))
+            if not getattr(args, "no_night", False) and not getattr(args, "stereo_only", False):
                 expected_outputs.append(
                     os.path.join(
                         out_dir,
-                        f"{base_title} (Night Mode){suffix}.m4a"))
+                        f"{base_title} (Night Mode){suffix}{ext}"))
 
         for name in ad_tracks.keys():
             label_prefix = f"{base_title}-AD" if len(
@@ -2098,17 +2368,44 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
             expected_outputs.append(
                 os.path.join(
                     out_dir,
-                    f"{label_prefix} (Stereo){suffix}.m4a"))
-            if not getattr(args, "no_night", False):
+                    f"{label_prefix} (Stereo){suffix}{ext}"))
+            if not getattr(args, "no_night", False) and not getattr(args, "stereo_only", False):
                 expected_outputs.append(
                     os.path.join(
                         out_dir,
-                        f"{label_prefix} (Night Mode){suffix}.m4a"))
+                        f"{label_prefix} (Night Mode){suffix}{ext}"))
             if args.mux_video:
                 expected_outputs.append(
                     os.path.join(
                         out_dir,
                         f"{base_title} (Sample Sync Preview {int(render_duration)}s).mkv"))
+
+        if getattr(args, "mux", False) and ref_path.lower().endswith(".mkv"):
+            mkv_dest_dir = args.mkv_dir if getattr(args, "mkv_dir", None) else out_dir
+            if os.path.abspath(mkv_dest_dir) == os.path.abspath(os.path.dirname(ref_path)):
+                suffix_mkv = " (Synced).mkv"
+            else:
+                suffix_mkv = ".mkv"
+            target_mkv = os.path.join(mkv_dest_dir, f"{base_title}{suffix_mkv}")
+            alt_mkv = os.path.join(mkv_dest_dir, f"{base_title}-stereoonly.mkv")
+
+            if not args.overwrite and not args.no_render:
+                found_mkv = None
+                if os.path.exists(target_mkv) and os.path.getsize(target_mkv) > 1000:
+                    found_mkv = target_mkv
+                elif os.path.exists(alt_mkv) and os.path.getsize(alt_mkv) > 1000:
+                    found_mkv = alt_mkv
+
+                if found_mkv:
+                    size_mb = os.path.getsize(found_mkv) / (1024 * 1024)
+                    print(f"\n  [SKIP] Final MKV already exists: {os.path.basename(found_mkv)} ({size_mb:.1f} MB)")
+                    print(f"  Skipping episode analysis and rendering (use --overwrite to force).")
+                    print(
+                        "================================================================================\n",
+                        flush=True)
+                    return True
+
+            expected_outputs.append(target_mkv)
 
         all_exist = len(expected_outputs) > 0 and all(os.path.exists(
             p) and os.path.getsize(p) > 1000 for p in expected_outputs)
@@ -2132,9 +2429,9 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
             label_prefix = f"{base_title}-AD" if len(
                 ad_tracks) == 1 else f"{base_title}-AD [{name}]"
             out_stereo = os.path.join(
-                out_dir, f"{label_prefix} (Stereo){suffix}.m4a")
+                out_dir, f"{label_prefix} (Stereo){suffix}{ext}")
             out_night = os.path.join(
-                out_dir, f"{label_prefix} (Night Mode){suffix}.m4a")
+                out_dir, f"{label_prefix} (Night Mode){suffix}{ext}")
             out_mkv = os.path.join(
                 out_dir, f"{base_title} (Sample Sync Preview {int(render_duration)}s).mkv") if args.mux_video else None
 
@@ -2165,9 +2462,14 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
                 debug=getattr(args, "debug", False)
             )
         else:
-            print(
-                f"\n  [INFO] All AD deliverables already exist. Skipping acoustic cross-correlation.",
-                flush=True)
+            if ad_tracks:
+                print(
+                    f"\n  [INFO] All AD deliverables already exist. Skipping acoustic cross-correlation.",
+                    flush=True)
+            else:
+                print(
+                    f"\n  [INFO] No Audio Description tracks to sync. Skipping acoustic cross-correlation.",
+                    flush=True)
 
         if not args.no_render:
             if args.convert_main:
@@ -2175,7 +2477,8 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
                     ffmpeg_bin, ref_path, base_title, out_dir, scratch_dir, channels,
                     stream_map=ref_stream_map, preview_sec=args.preview, threads=args.threads,
                     keep_scratch=args.keep_scratch, overwrite=args.overwrite, no_night=getattr(
-                        args, "no_night", False)
+                        args, "no_night", False), stereo_only=getattr(args, "stereo_only", False),
+                    wav=getattr(args, "wav", False)
                 )
 
             if needed_ad_tracks:
@@ -2190,7 +2493,34 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
                     no_multiband=getattr(args, "no_multiband", False),
                     no_gap_fill=getattr(args, "no_gap_fill", False),
                     total_ad_count=len(ad_tracks),
+                    wav=getattr(args, "wav", False),
                 )
+
+            if getattr(args, "mux", False) and ref_path.lower().endswith(".mkv"):
+                main_stereo = os.path.join(out_dir, f"{base_title} (Stereo){suffix}{ext}")
+                ad_stereo_tracks = []
+                for name in ad_tracks.keys():
+                    label_prefix = f"{base_title}-AD" if len(
+                        ad_tracks) == 1 else f"{base_title}-AD [{name}]"
+                    ad_s = os.path.join(out_dir, f"{label_prefix} (Stereo){suffix}{ext}")
+                    if os.path.exists(ad_s):
+                        ad_stereo_tracks.append(ad_s)
+
+                if os.path.exists(main_stereo) and ad_stereo_tracks:
+                    mkv_dest_dir = args.mkv_dir if getattr(args, "mkv_dir", None) else out_dir
+                    if os.path.abspath(mkv_dest_dir) == os.path.abspath(os.path.dirname(ref_path)):
+                        suffix_mkv = " (Synced).mkv"
+                    else:
+                        suffix_mkv = ".mkv"
+                    final_mkv = os.path.join(mkv_dest_dir, f"{base_title}{suffix_mkv}")
+                    mux_final_mkv(
+                        ref_mkv=ref_path,
+                        main_stereo=main_stereo,
+                        ad_tracks_stereo=ad_stereo_tracks,
+                        out_mkv=final_mkv,
+                        stereo_only=getattr(args, "stereo_only", False),
+                        overwrite=args.overwrite
+                    )
 
         if not args.keep_scratch:
             try:
@@ -2207,7 +2537,10 @@ def process_single_movie(target_dir, args, ffmpeg_bin, ffprobe_bin):
         print(f"{Color.bold('FINAL SYNC SUMMARY:')}")
 
         if args.convert_main:
-            print(f"  Main Audio     : {Color.ok('Processed')} (Surround / Stereo / Night Mode)")
+            if getattr(args, "stereo_only", False):
+                print(f"  Main Audio     : {Color.ok('Processed')} (Stereo)")
+            else:
+                print(f"  Main Audio     : {Color.ok('Processed')} (Surround / Stereo / Night Mode)")
 
         for name, params in sync_params.items():
             method = params.get("method", "cross_correlation")
@@ -2361,9 +2694,32 @@ normalization, and MKV sample multiplexing.
             False),
         help="Overwrite existing output deliverables in output/ (Default: False, skips existing files)")
     parser.add_argument(
+        "--clean-scratch",
+        "--wipe-scratch",
+        dest="clean_scratch",
+        action="store_true",
+        help="Wipe and clear the scratch directory before running for a clean run from scratch")
+    parser.add_argument(
+        "--wav",
+        action="store_true",
+        help="Output uncompressed 16-bit 48kHz PCM WAV for stereo deliverables instead of AAC (for rapid sync testing)")
+    parser.add_argument(
         "--convert-main",
         action="store_true",
         help="Also convert and downmix reference main audio (Surround AC3, True 2.0 Stereo AAC, Night Mode AAC)")
+    parser.add_argument(
+        "--stereo-only",
+        action="store_true",
+        help="Downmix reference main audio to stereo only (skips surround 5.1 AC3 output)")
+    parser.add_argument(
+        "--mux",
+        action="store_true",
+        help="Multiplex final MKV containing video, stereo audio tracks, and subtitles using mkvmerge")
+    parser.add_argument(
+        "--mkv-dir",
+        dest="mkv_dir",
+        default=None,
+        help="Directory to output the final multiplexed MKV (Defaults to <movie_dir>/output)")
     parser.add_argument(
         "--no-night",
         action="store_true",
@@ -2480,6 +2836,8 @@ normalization, and MKV sample multiplexing.
         help="Directory path where run logs are stored (Defaults to config or target movie directory)")
 
     args = parser.parse_args()
+    if getattr(args, "stereo_only", False):
+        args.convert_main = True
     args.debug = args.debug or CONFIG.get("debug_mode", False)
     
     if args.debug:
@@ -2498,13 +2856,15 @@ normalization, and MKV sample multiplexing.
             os.path.join(target_dir, d) for d in os.listdir(target_dir)
             if os.path.isdir(os.path.join(target_dir, d)) and not d.lower() in ["scratch", "output", "bin"]
         ]
-        # Filter subdirectories that have source or tosync
-        movie_dirs = [
-            d for d in subdirs if os.path.exists(
-                os.path.join(
-                    d, "source")) or os.path.exists(
-                os.path.join(
-                    d, "tosync"))]
+        # Filter subdirectories that have source or tosync, or direct discoverable inputs
+        movie_dirs = []
+        for d in subdirs:
+            if os.path.exists(os.path.join(d, "source")) or os.path.exists(os.path.join(d, "tosync")):
+                movie_dirs.append(d)
+            else:
+                ref_chk, ads_chk = auto_discover_inputs(d)
+                if ref_chk and (ads_chk or args.convert_main):
+                    movie_dirs.append(d)
 
         if movie_dirs:
             print(

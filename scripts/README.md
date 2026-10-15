@@ -19,6 +19,7 @@ This directory contains the production-ready tools for acoustic audio descriptio
 | **[`set_commentary_flags.py`](#9-set_commentary_flagspy-in-place-mkv-tagger)** | In-place Matroska commentary flagger | No | MKV files / directory | In-place tagged MKV (`flag-commentary=1`) |
 | **[`plex_ad_commentary_collections.py`](#10-plex_ad_commentary_collectionspy-plex-sync)** | Plex server collection maintainer | No | Plex media library | Smart static collections in Plex |
 | **[`parse_mpls.py`](#11-parse_mplspy-blu-ray-playlist-parser)** | Blu-ray 45 kHz PTS playlist parser | No | Retail `.mpls` playlist files | Clip list with exact in/out timestamps |
+| **[`chunk_ad_video.py`](#11-chunk_ad_videopy-gemini-ad-video-chunker)** | Automated 1 FPS video chunking for Gemini AD pipeline | Yes | MKV, MP4, video files | Balanced 1 FPS MP4 chunks + `{movie}_ad_manifest.json` |
 
 ---
 
@@ -35,7 +36,8 @@ Master tool for synchronizing external Audio Description tracks to reference med
   * `adsync` (Default): High-speed Viterbi candidate lattice DP + Monotone PCHIP warp + WSOLA rendering (~15-30s).
   * `describealign` (Legacy): Linear programming DTW + Plateau Consolidation Multilayer stitcher.
 * **Master Audio Gap Filling**: Automatically detects missing AD scenes/edits and seamlessly fills timeline voids with volume-matched Blu-ray soundtrack audio.
-* **Skip Generation Overrides**: Supports `--overwrite` to force re-render existing outputs, and `--no-night` to skip loudnorm nighttime encode.
+* **Rapid Test Iterations (`--wav` & `--no-night`)**: Generates 16-bit 48kHz uncompressed PCM WAV deliverables directly without waiting for AAC compression, and disables the slow `loudnorm` nighttime filter.
+* **Scratch Caching & Clean Runs (`--clean-scratch` / `--wipe-scratch`)**: Automatically caches acoustic correlation results in `scratch/sync_params.json` and reuses warped audio in `scratch/adsync/` across reruns. Use `--clean-scratch` to wipe scratch for a 100% clean run.
 * **Strict ITU-R BS.775 2.0 Downmixing**: Enforces standard downmix matrix (`pan=stereo|c0=c0+0.7071*c2+0.7071*c4|c1=c1+0.7071*c2+0.7071*c5`), `-ac 2`, and `-ar 48000`.
 * **Overwrite Protection (`--overwrite` / `-f` / `--force-overwrite`)**: Prevents re-rendering deliverables that already exist in `output/` by default, saving CPU and time during queue re-runs.
 * **Detailed Final Sync Summary**: Outputs a comprehensive report detailing global offset, sample-rate stretch, and structural cut timestamps for easy manual verification.
@@ -48,13 +50,16 @@ python scripts/sync_ad_track.py "F:\uploads\queue\Movie1" --convert-main
 # 2. Batch process all movie folders in a queue:
 python scripts/sync_ad_track.py "F:\uploads\queue" --batch --convert-main
 
-# 3. Force re-analyzing and overwriting existing deliverables:
-python scripts/sync_ad_track.py "F:\uploads\queue\Movie1" --convert-main --overwrite
+# 3. Fast sync testing (WAV output, no night mode, reuse scratch):
+python scripts/sync_ad_track.py "F:\uploads\queue\Movie1" --wav --no-night --overwrite --keep-scratch
 
-# 4. Explicit files with stream selection and forced DTW:
+# 4. Clean run from scratch (wipe scratch folder and recompute):
+python scripts/sync_ad_track.py "F:\uploads\queue\Movie1" --clean-scratch --convert-main
+
+# 5. Explicit files with stream selection and forced DTW:
 python scripts/sync_ad_track.py -r "F:\media\Movie2.mkv" --ref-stream 0:a:1 -a "F:\media\Movie2_AD.mp3" --force-dtw --no-pal
 
-# 5. Fast 3-minute video sync test preview:
+# 6. Fast 3-minute video sync test preview:
 python scripts/sync_ad_track.py "F:\uploads\queue\Movie1" --preview 180 -m "F:\uploads\queue\Movie1\source\Movie1.mkv"
 ```
 
@@ -189,3 +194,32 @@ Utility for extracting exact 45 kHz PTS timestamps and PlayItem sequence duratio
 # Inspect a Blu-ray playlist:
 python scripts/parse_mpls.py "D:\BDMV\PLAYLIST\00800.mpls"
 ```
+
+---
+
+## 11. `chunk_ad_video.py` (Gemini AD Video Chunker)
+
+Specialized video pre-processor for the Automated Long-Form Video Descriptive Audio (AD) pipeline. Slices source movies into balanced, lightweight sections (default <= 45 minutes each) pre-transcoded directly to Gemini's multimodal ingestion profile (1 FPS, 720p/480p, CRF 28, mono AAC 64k). Automatically scores and selects cut boundaries within dialogue pauses (`silencedetect`), visual scene transitions (`select='gt(scene,0.25)'`), and Matroska chapters to preserve speech continuity. Outputs a comprehensive JSON manifest with sample-accurate timestamps for downstream Gemini inference, TTS synthesis, and timeline re-alignment.
+
+### Key Capabilities:
+* **Dialogue Preservation**: Scans audio for silence intervals (-30 dB) to ensure cut boundaries never interrupt spoken dialogue.
+* **Scene and Chapter Snapping**: Aligns cut boundaries with camera shot changes and retail disc chapters.
+* **Gemini 1 FPS Pre-Processing**: Downsamples video to 1 FPS and mono AAC, slashing file sizes by ~90-95% for rapid Gemini File API upload.
+* **Structured Manifest Output**: Emits `{basename}_ad_manifest.json` containing exact start/end timecodes and timeline offsets.
+* **Dry-Run Analysis**: Supports `--dry-run` to preview chunk boundaries and manifest without transcoding.
+
+### Common Commands:
+```powershell
+# Standard 45m max chunking of a movie MKV:
+python scripts/chunk_ad_video.py "F:\uploads\Movie\Movie.mkv"
+
+# Dry-run analysis (inspect cut points and generate manifest only):
+python scripts/chunk_ad_video.py "F:\uploads\Movie\Movie.mkv" --dry-run
+
+# Custom target chunk constraints (e.g. max 35m, min 25m):
+python scripts/chunk_ad_video.py "F:\uploads\Movie\Movie.mkv" --max-duration 35 --min-duration 25
+
+# 480p resolution profile with 96k audio bitrate:
+python scripts/chunk_ad_video.py "F:\uploads\Movie\Movie.mkv" --resolution 480p --audio-bitrate 96k
+```
+

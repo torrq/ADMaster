@@ -43,6 +43,8 @@ For encoding specs, FFmpeg rules, and detailed workflow instructions, see the **
 * **Standard Audio Variants**:
   * **AD Tracks**: Generates `-AD (Stereo).m4a` (`alimiter`) and `-AD (Night Mode).m4a` (`loudnorm` -16 LUFS).
   * **Main Audio (`--convert-main`)**: Probes channels and outputs `(Surround).ac3` (5.1 640k), `(Stereo).m4a` (true 2.0 downmix + `alimiter`), and `(Night Mode).m4a` (true 2.0 downmix + `loudnorm`).
+* **Fast Test Iterations (`--wav` & `--no-night`)**: Generates 16-bit 48kHz uncompressed PCM WAV stereo deliverables (`.wav`) in seconds without waiting for AAC compression, and bypasses the slow `loudnorm` nighttime filter.
+* **Scratch Caching & Clean Runs (`--clean-scratch` / `--wipe-scratch`)**: Automatically caches acoustic correlation results in `scratch/sync_params.json` and reuses warped audio in `scratch/adsync/` across reruns. Use `--clean-scratch` to wipe scratch for a 100% clean run.
 * **Preview Mode (`--preview [sec]`)**: Fast test-listening with optional MKV video muxing (`-m`).
 
 ### ADSync (Primary -- Non-Linear Time Warping)
