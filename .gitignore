@@ -62,7 +62,7 @@ env.bak/
 venv.bak/
 
 # Custom Project Ignores
-scratch/
-bin/
+/scratch/
+/bin/
 /target/
 admaster.toml
