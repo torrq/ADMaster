@@ -1,0 +1,39 @@
+[package]
+name = "admaster"
+version = "2.0.0"
+edition = "2021"
+description = "High-performance pure-Rust Audio Description (AD) synchronization, non-linear Viterbi+PCHIP warping, ITU-R BS.775 downmixing, and Matroska mastering toolkit"
+license = "MIT"
+repository = "https://github.com/torrq/admaster"
+
+[features]
+default = ["gui"]
+gui = ["dep:eframe", "dep:egui", "dep:resvg", "dep:rfd"]
+
+[[bin]]
+name = "admaster"
+path = "src/main.rs"
+required-features = ["gui"]
+
+[[bin]]
+name = "admaster-cli"
+path = "src/bin/admaster_cli.rs"
+
+[dependencies]
+eframe = { version = "0.29", optional = true }
+egui = { version = "0.29", optional = true }
+resvg = { version = "0.45", default-features = false, optional = true }
+rfd = { version = "0.15", optional = true }
+rayon = "1.10"
+crossbeam-channel = "0.5"
+rustfft = "6.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+directories = "5.0"
+chrono = "0.4"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

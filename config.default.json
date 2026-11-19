@@ -26,17 +26,6 @@
   // Leave empty ("") to auto-discover in ./bin/, Program Files, or system PATH.
   "mkvextract_path": "",
 
-  // Path to ADSync repository root or source package.
-  // Leave empty ("") to auto-discover in sibling directories or Python environment.
-  "adsync_path": "",
-
-  // Path to describealign.py script for legacy DTW alignment.
-  // Leave empty ("") to automatically resolve from sibling directories or PATH.
-  "describealign_path": "",
-
-  // Default non-linear warp engine for complex edits: "adsync" (default) or "describealign".
-  "default_warp_engine": "adsync",
-
   // Default number of CPU threads allocated for FFmpeg encoding operations (Default: 2).
   "default_threads": 2,
 

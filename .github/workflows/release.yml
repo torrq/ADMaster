@@ -1,0 +1,234 @@
+name: Release Builds
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows (x86_64)
+            os: windows-latest
+            targets: x86_64-pc-windows-msvc
+            cache_key: windows-x86_64
+            artifact_name: admaster-windows-x86_64
+          - name: Linux (x86_64)
+            os: ubuntu-latest
+            targets: x86_64-unknown-linux-gnu
+            cache_key: linux-x86_64-glibc228
+            artifact_name: admaster-linux-x86_64
+          - name: macOS (Universal arm64 + x86_64)
+            os: macos-latest
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+            cache_key: macos-universal
+            artifact_name: admaster-macos-universal
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux windowing/GL dev libraries & cargo-zigbuild
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libgl1-mesa-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libgtk-3-dev \
+            python3-venv
+          python3 -m venv "$RUNNER_TEMP/zig-venv"
+          "$RUNNER_TEMP/zig-venv/bin/pip" install --quiet cargo-zigbuild
+          echo "$RUNNER_TEMP/zig-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+
+      - name: Cache Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.cache_key }}
+
+      - name: Run release tests (native host target)
+        run: |
+          cargo test --release --locked
+          cargo check --release --locked --no-default-features --bin admaster-cli
+
+      - name: Build release binary (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          cargo build --release --locked --target x86_64-pc-windows-msvc --bin admaster
+          cargo build --release --locked --no-default-features --target x86_64-pc-windows-msvc --bin admaster-cli
+          New-Item -ItemType Directory -Force -Path dist/stage | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/admaster.exe dist/stage/
+          Copy-Item target/x86_64-pc-windows-msvc/release/admaster-cli.exe dist/stage/
+          Copy-Item README.md, LICENSE dist/stage/
+          Compress-Archive -Path dist/stage/* -DestinationPath dist/admaster-windows-x86_64.zip -Force
+
+      - name: Build release binary (Linux glibc 2.28+)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo zigbuild --release --locked --target x86_64-unknown-linux-gnu.2.28 --bin admaster
+          cargo zigbuild --release --locked --no-default-features --target x86_64-unknown-linux-gnu.2.28 --bin admaster-cli
+          BIN="target/x86_64-unknown-linux-gnu/release/admaster"
+          CLI_BIN="target/x86_64-unknown-linux-gnu/release/admaster-cli"
+          strip "$BIN" "$CLI_BIN"
+          echo "=== Shared library dependencies ==="
+          ldd "$BIN" || true
+          echo "=== Required GLIBC symbol versions ==="
+          GLIBC_VERS=$(objdump -T "$BIN" "$CLI_BIN" | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' | sort -Vu || true)
+          echo "$GLIBC_VERS"
+          MAX_VER=$(echo "$GLIBC_VERS" | sed 's/GLIBC_//' | sort -V | tail -n1)
+          echo "Max required GLIBC version: ${MAX_VER:-none}"
+          if [ -n "$MAX_VER" ]; then
+            python3 -c "import sys; v=tuple(int(x) for x in '$MAX_VER'.split('.')); sys.exit(0 if v[:2] <= (2, 28) else 1)"
+          fi
+          mkdir -p dist/stage
+          cp "$BIN" "$CLI_BIN" dist/stage/
+          cp README.md LICENSE dist/stage/
+          tar -czf dist/admaster-linux-x86_64.tar.gz -C dist/stage .
+
+      - name: Build Universal macOS .app bundle (arm64 + x86_64)
+        if: matrix.os == 'macos-latest'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin --bin admaster
+          cargo build --release --locked --target x86_64-apple-darwin --bin admaster
+          cargo build --release --locked --no-default-features --target aarch64-apple-darwin --bin admaster-cli
+          cargo build --release --locked --no-default-features --target x86_64-apple-darwin --bin admaster-cli
+          mkdir -p dist/stage/ADMaster.app/Contents/MacOS
+          mkdir -p dist/stage/ADMaster.app/Contents/Resources
+          cp assets/icon.icns dist/stage/ADMaster.app/Contents/Resources/ADMaster.icns
+          lipo -create \
+            target/aarch64-apple-darwin/release/admaster \
+            target/x86_64-apple-darwin/release/admaster \
+            -output dist/stage/ADMaster.app/Contents/MacOS/admaster
+          lipo -create \
+            target/aarch64-apple-darwin/release/admaster-cli \
+            target/x86_64-apple-darwin/release/admaster-cli \
+            -output dist/stage/admaster-cli
+          chmod +x dist/stage/ADMaster.app/Contents/MacOS/admaster dist/stage/admaster-cli
+          APP_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          cat << EOF > dist/stage/ADMaster.app/Contents/Info.plist
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleExecutable</key>
+            <string>admaster</string>
+            <key>CFBundleIconFile</key>
+            <string>ADMaster.icns</string>
+            <key>CFBundleIdentifier</key>
+            <string>org.admaster.ADMaster</string>
+            <key>CFBundleName</key>
+            <string>ADMaster</string>
+            <key>CFBundleDisplayName</key>
+            <string>ADMaster</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleVersion</key>
+            <string>${APP_VERSION}</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${APP_VERSION}</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>11.0</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+          </dict>
+          </plist>
+          EOF
+          cp README.md LICENSE dist/stage/
+          ditto -c -k --sequesterRsrc dist/stage dist/admaster-macos-universal.zip
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256 checksums
+        run: |
+          cd dist
+          sha256sum *.zip *.tar.gz > SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: false
+          body: |
+            ```text
+            ADMaster v2.0.0 Changelog
+            =========================
+
+            Pure-Rust Engine Rewrite & Desktop Studio (admaster + admaster-cli)
+            -------------------------------------------------------------------
+            - Complete rewrite from Python/NumPy/SciPy into a high-performance pure-Rust
+              desktop studio (admaster) and standalone command-line runner (admaster-cli)
+              for Windows, macOS (Universal arm64 + x86_64 .app), and Linux (glibc 2.28+).
+            - Streaming 30-second Catmull-Rom cubic warp renderer and windowed Reference
+              Master Audio gap splicer reduce peak memory usage from 3.5+ GiB down to
+              under 55 MB RAM on full-length feature films.
+
+            Alignment, PAL Probing & Non-Linear Warping
+            -------------------------------------------
+            - 100-anchor 3-band narration-suppressed FFT cross-correlation (4th-order
+              Butterworth SOS filtfilt downweighting the 250-1200 Hz speech band to 0.2).
+            - Automatic 2-second Shazam-style STFT landmark constellation PAL speed
+              prober (detects 25.0 fps vs. 23.976 fps transfers without filename tags).
+            - Native Rust implementation of the ADSync non-linear alignment pipeline
+              (second-order Viterbi candidate lattice dynamic programming, monotone
+              Fritsch-Carlson PCHIP cubic spline fitting, and silence-nudged cut boundary
+              refinement).
+            - Removed legacy DescribeAlign support in favor of the faster, continuous
+              Viterbi + PCHIP spline warp architecture.
+
+            Two-Zone Drag-and-Drop GUI & Mastering Deliverables
+            ---------------------------------------------------
+            - Color-coded two-zone drag-and-drop staging studio: drop a video/surround
+              master (.mkv, .mp4, .m2ts, .dts, .dtshd, .thd) to set Zone 1 (Reference
+              Master) and drop syncable audio files (.mp3, .m4a, .flac, .aac, .ogg, .wav,
+              .ac3, .eac3) to queue Zone 2 (Tracks to Sync).
+            - Interactive PCHIP warp curve and 100-anchor correlation inspector, plus a
+              full-height two-pane Settings view and Dark/Light/System Auto theme support.
+            - Broadcast-standard ITU-R BS.775 True 2.0 stereo downmixing, EBU R128 Night
+              Mode loudness normalization (-16 LUFS), and one-pass MKVMerge multiplexing.
+            ```
+          files: dist/*

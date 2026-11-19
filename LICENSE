@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2026 ADMaster contributors
+Copyright (c) 2026 torrq
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,3 +19,57 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+================================================================================
+THIRD-PARTY SOFTWARE NOTICES AND ATTRIBUTIONS
+================================================================================
+
+1. ADSync (https://github.com/JohnnyTheCoder1/ADSync)
+   Portions of the non-linear audio alignment pipeline in src/dsp/ (including
+   3-band narration speech suppression, STFT acoustic landmark constellation
+   probing, second-order Viterbi candidate lattice dynamic programming,
+   monotone Fritsch-Carlson PCHIP cubic spline warping, and silence-nudged cut
+   boundary refinement) are adapted from ADSync by Anilo (JohnnyTheCoder1),
+   used under the terms of the MIT License:
+
+   MIT License
+
+   Copyright (c) 2026 Anilo
+
+   Permission is hereby granted, free of charge, to any person obtaining a copy
+   of this software and associated documentation files (the "Software"), to deal
+   in the Software without restriction, including without limitation the rights
+   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+   copies of the Software, and to permit persons to whom the Software is
+   furnished to do so, subject to the following conditions:
+
+   The above copyright notice and this permission notice shall be included in all
+   copies or substantial portions of the Software.
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+   SOFTWARE.
+
+--------------------------------------------------------------------------------
+
+2. Rust Open-Source Dependencies (MIT / Apache-2.0)
+   * egui & eframe -- Copyright (c) Emil Ernerfeldt (https://github.com/emilk/egui)
+   * resvg & usvg -- Copyright (c) Yevhenii Reizner & Linebender (https://github.com/linebender/resvg)
+   * tiny-skia -- Copyright (c) Yevhenii Reizner & Linebender (https://github.com/linebender/tiny-skia)
+   * RustFFT -- Copyright (c) Elliott Mahler (https://github.com/ejmahler/RustFFT)
+   * Rayon -- Copyright (c) Niko Matsakis and Josh Stone (https://github.com/rayon-rs/rayon)
+   * rfd (Rusty File Dialog) -- Copyright (c) PolyMeilex (https://github.com/PolyMeilex/rfd)
+   * crossbeam-channel -- Copyright (c) The Crossbeam Project Developers (https://github.com/crossbeam-rs/crossbeam)
+   * Serde & serde_json -- Copyright (c) Erick Tryzelaar and David Tolnay (https://github.com/serde-rs/serde)
+   * toml -- Copyright (c) Alex Crichton and Ed Page (https://github.com/toml-rs/toml)
+   * Chrono -- Copyright (c) Kang Seonghoon and contributors (https://github.com/chronotope/chrono)
+   * directories -- Copyright (c) Simon Ochsenreither (https://github.com/dirs-dev/directories-rs)
+   * winresource -- Copyright (c) Matthias Endler and contributors (https://github.com/mxre/winresource)
+
+3. External Command-Line Media Tools (Invoked as Subprocesses)
+   * FFmpeg & FFprobe -- Copyright (c) The FFmpeg developers (https://github.com/FFmpeg/FFmpeg)
+   * MKVToolNix (mkvmerge, mkvpropedit, mkvextract) -- Copyright (c) Moritz Bunkus (https://github.com/mbunkus/mkvtoolnix)

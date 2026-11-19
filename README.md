@@ -1,195 +1,112 @@
-<img width="1672" height="500" alt="ADMaster" src="https://github.com/user-attachments/assets/f2a5f098-cf73-432d-a949-f856c72426cb" />
+<img width="1672" height="500" alt="ADMaster" src="assets/banner.png" />
 
-# ADMaster -- Universal Audio Description & Secondary Audio Sync Toolkit
+# ADMaster -- Pure-Rust Audio Description Synchronization & Mastering Studio
 
-**ADMaster** is a high-performance, automated Python toolkit for synchronizing, downmixing, loudness-normalizing, and packaging Audio Description (AD) and secondary commentary tracks for movies and television series.
+**ADMaster** (`v2.0`) is a high-performance, low-memory pure-Rust desktop studio (`admaster.exe`) and standalone command-line interface (`admaster-cli.exe`) for synchronizing, time-warping, downmixing, loudness-normalizing, and multiplexing Audio Description (AD) and secondary audio tracks for movies and television series.
 
-It provides sub-millisecond acoustic cross-correlation, dynamic Dynamic Time Warping (DTW) piecewise alignment with Multilayer transition smoothing, frame-accurate black-screen commercial break excision, broadcast-standard ITU-R BS.775 2.0 stereo downmixing, in-place Matroska flag management, and Plex Media Server collection integration.
-
----
-
-## Production Scripts Index
-
-All scripts are located in [`scripts/`](scripts/) and can be run standalone or chained in automated batch workflows:
-
-| Script | Purpose | When to Use |
-| :--- | :--- | :--- |
-| **[`sync_ad_track.py`](scripts/README.md#1-sync_ad_trackpy-master-sync--encoder)** | **Master Movie Sync & Encoder** | Aligning AD tracks to movies, queue batch processing, dynamic PAL conversion, 5.1/2.0 deliverable rendering. |
-| **[`batch_orchestrator.py`](scripts/README.md#2-batch_orchestratorpy-tv-season-orchestrator)** | **TV Season Router** | Processing entire TV seasons with automatic strategy selection (Direct Mux, Frame-Perfect Cut, DTW). |
-| **[`dtw_smooth_stitch.py`](scripts/README.md#3-dtw_smooth_stitchpy-dtw-transition-smoother)** | **Multilayer DTW Smoother** | Re-stitching DescribeAlign alignment maps with VAD cut nudging, zero-crossing snapping, and 50ms crossfades. |
-| **[`batch_frameperfect.py`](scripts/README.md#4-batch_frameperfectpy-commercial-break-cutter)** | **Commercial Break Cutter** | Surgically cutting black screen commercial gaps from video streams without keyframe snapping. |
-| **[`remove_commercial_breaks.py`](scripts/README.md#5-remove_commercial_breakspy-break-detector)** | **Break Scanner** | Detecting simultaneous video black and audio silence intervals to output exact cut timestamps. |
-| **[`convert_main_tracks.py`](scripts/README.md#6-convert_main_trackspy-master-audio-converter)** | **Master Audio Downmixer** | Extracting and downmixing 5.1/7.1 masters into true 2.0 Stereo (`alimiter`) and Night Mode (`loudnorm`). |
-| **[`convert_ad_2pass.py`](scripts/README.md#7-convert_ad_2passpy-2-pass-loudness-normalizer)** | **2-Pass Loudness Normalizer** | Applying broadcast EBU R128 loudness normalization directly to standalone audio tracks. |
-| **[`set_commentary_flags.py`](scripts/README.md#8-set_commentary_flagspy-in-place-mkv-tagger)** | **In-Place MKV Tagger** | Tagging commentary and director audio tracks with `flag-commentary=1` in ~10ms via `mkvpropedit`. |
-| **[`plex_ad_commentary_collections.py`](scripts/README.md#9-plex_ad_commentary_collectionspy-plex-sync)** | **Plex Server Integration** | Automatically creating and maintaining smart Plex collections for AD and commentary media. |
-| **[`parse_mpls.py`](scripts/README.md#10-parse_mplspy-blu-ray-playlist-parser)** | **Blu-ray Playlist Parser** | Extracting 45 kHz PTS PlayItem timestamps directly from retail Blu-ray `.mpls` playlist files. |
-
-*(For detailed CLI flags and parameter options for each script, refer to [`scripts/README.md`](scripts/README.md))*
+It combines **100-anchor 3-band narration-suppressed FFT cross-correlation** with a native Rust implementation of the **[ADSync](https://github.com/JohnnyTheCoder1/ADSync)** non-linear alignment architecture (Shazam-style acoustic landmark constellation PAL speed probing, second-order Viterbi candidate lattice dynamic programming, monotone Fritsch-Carlson PCHIP cubic spline warping, and silence-nudged cut boundary refinement), plus a **streaming 30-second Catmull-Rom cubic warp renderer** and **windowed Master Audio gap splicer** that keep peak memory usage under **55 MB RAM** even on 3.5-hour feature films.
 
 ---
 
-## Quick Start & Common Workflows
+## Binaries & Workspace Architecture
 
-### 1. Movie Directory Auto-Discovery (Acoustic Correlation + Deliverables)
-Drop the reference video or audio file into `source/` and all candidate AD tracks into `tosync/`:
+| Binary / Path | Purpose |
+| :--- | :--- |
+| **`admaster` / `admaster.exe`** | **Desktop GUI Studio (`egui` / `eframe`)** -- Two-zone color-coded drag-and-drop staging (`Reference Master` vs. `Tracks to Sync`), interactive PCHIP warp curve & 100-anchor confidence inspector, full-height two-pane Settings studio, and live progress console. |
+| **`admaster-cli` / `admaster-cli.exe`** | **Headless Command-Line Runner** -- Zero-GUI batch automation for movie folders, multi-movie queue directories (`--batch`), and explicit `--ref` / `--ad` file pairs with `--json` machine-readable reporting. |
+| **`assets/icon.svg`** | Minimal vector master icon (Fuchsia & Amethyst interlocking PCHIP spline waves) compiled into `.ico` / `.icns` and rasterized at native DPI in-app via `resvg`. |
+| **`scripts/render_icon.py` & `render_banner.py`** | Build-time vector rasterizers that compile `assets/icon.svg` into multi-size `.ico`, `.icns`, and the README hero banner (`assets/banner.png`). |
+
+---
+
+## Quick Start
+
+### 1. Desktop GUI (`admaster.exe`)
+Launch `admaster.exe` and drag-and-drop media directly into the window:
+* **Drop a Video / Surround Master** (`.mkv`, `.mp4`, `.m2ts`, `.dts`, `.dtshd`, `.thd`) -> automatically assigned to **Zone 1: Reference Master (Sync To)**.
+* **Drop Syncable Audio Tracks** (`.mp3`, `.m4a`, `.flac`, `.aac`, `.ogg`, `.opus`, `.wav`, `.w64`, `.ac3`, `.eac3`, `.mka`) -> automatically added to **Zone 2: Audio Tracks to Sync**.
+* **Drop a Movie Project Folder** (containing `source/` and `tosync/`) -> automatically pairs the reference file with all candidate AD tracks.
+
+### 2. Command-Line Interface (`admaster-cli.exe`)
+
 ```powershell
-# Automatically discovers files, computes 100-anchor offset, renders dual AD and triple Main audio:
-python scripts/sync_ad_track.py "F:\uploads\queue\Movie1" --convert-main
+# 1. Auto-discover source/ and tosync/ inside a movie folder and also convert Main Audio:
+admaster-cli.exe "F:\uploads\queue\Movie1" --convert-main
+
+# 2. Batch-process all movie subdirectories inside a parent queue directory:
+admaster-cli.exe "F:\uploads\queue" --batch --convert-main
+
+# 3. Sync explicit reference and AD track files directly:
+admaster-cli.exe --ref "F:\Master.mkv" --ad "F:\Track_UK_AD.m4a" --mux
+
+# 4. Force non-linear Viterbi + PCHIP spline warp alignment (bypass global anchor consensus):
+admaster-cli.exe "F:\uploads\queue\Movie2" --force-warp --no-pal
+
+# 5. Fast uncompressed 48kHz stereo WAV test pass (skip Night Mode loudnorm):
+admaster-cli.exe "F:\uploads\queue\Movie1" --wav --no-night
+
+# 6. Render a 180-second test preview MKV sample:
+admaster-cli.exe "F:\uploads\queue\Movie1" --preview 180 -m
 ```
 
-### 2. Batch Processing a Full Queue Directory
-Process an entire directory containing dozens of movie folders sequentially:
+---
+
+## Core DSP & Mastering Pipeline
+
+1. **3-Band Narration Speech Suppression (`src/dsp/filters.rs`)**:
+   4th-order zero-phase Butterworth SOS `filtfilt` cascade splits audio into Low (`< 250 Hz`), Mid/Speech (`250 - 1200 Hz`), and High (`> 1200 Hz`) bands, downweighting the narrator speech band to `0.2` so cross-correlation locks onto background score and sound effects rather than voiceover narration.
+2. **Automatic 2-Second Landmark PAL Speed Prober (`src/dsp/fingerprint.rs`)**:
+   Extracts Shazam-style STFT spectral peak pairs in a streaming ring buffer and evaluates monotone bucket chains at native `1.0x` (`23.976 fps`) and PAL `1.042709x` (`25.0 fps`) without requiring `[UK]` or `[PAL]` filename tags.
+3. **100-Anchor Parallel FFT Cross-Correlation (`src/dsp/correlation.rs`)**:
+   Evaluates 100 anchors across `5%..88%` of the timeline in parallel via `rayon` and `rustfft` with parabolic sub-sample peak interpolation.
+4. **Second-Order Viterbi Lattice & Monotone PCHIP Warping (`src/dsp/warp.rs`)**:
+   When alternate cuts, reel splices, or censorship trims are detected, builds a 4 kHz 3-band candidate lattice, solves the globally optimal path via second-order Viterbi dynamic programming (penalizing offset jumps and slope curvature), nudges structural cut boundaries into narrator silence windows (`_nudge_to_silence`), fits monotone Fritsch-Carlson PCHIP cubic splines, and renders the warped stereo track in 30-second streaming chunks via 4-point Catmull-Rom cubic interpolation (`< 35 MB` peak RAM).
+5. **Windowed Reference Master Audio Gap Filling (`src/dsp/gap_fill.rs`)**:
+   Detects excised scenes / timeline voids (`>= 0.25 s`) and splices level-matched (`-2.0 dB` RMS capped) reference Blu-ray soundtrack audio across the gap with `50 ms` equal-power cosine crossfades using random-access windowed WAV reads (`< 15 MB` RAM).
+6. **ITU-R BS.775 True 2.0 Stereo & EBU R128 Night Mode (`src/pipeline.rs`)**:
+   * **ITU-R BS.775 Downmix Matrix**: `c0 = L + 0.7071*C + 0.7071*Ls`, `c1 = R + 0.7071*C + 0.7071*Rs` with explicit `-ac 2` and `-ar 48000`.
+   * **Stereo Deliverable**: BS.775 downmix + `alimiter=level_in=1:level_out=0.98:limit=0.98`.
+   * **Night Mode Deliverable**: BS.775 downmix + EBU R128 loudness normalization (`loudnorm=I=-16:TP=-1.5:LRA=11`).
+
+---
+
+## Credits, Acknowledgments & Open-Source Software
+
+ADMaster stands on the shoulders of outstanding open-source audio, video, and Rust projects. Full credit and gratitude go to their authors and maintainers:
+
+### Core Alignment & Media Engines
+* **[ADSync](https://github.com/JohnnyTheCoder1/ADSync)** by **Anilo ([JohnnyTheCoder1](https://github.com/JohnnyTheCoder1))** (*MIT License -- Copyright (c) 2026 Anilo*) -- The foundational non-linear Audio Description alignment architecture from which ADMaster's Rust warping pipeline (`src/dsp/`) is adapted, including 3-band narration speech suppression, STFT acoustic landmark constellation speed probing, second-order Viterbi candidate lattice dynamic programming, monotone Fritsch-Carlson PCHIP spline fitting, and silence-aware cut boundary refinement.
+* **[FFmpeg](https://github.com/FFmpeg/FFmpeg)** by **The FFmpeg Developers** (*LGPLv2.1+ / GPLv2+*) -- Universal multimedia framework invoked as an external subprocess for container probing (`ffprobe`), stream decoding, dynamic `asetrate` PAL clock conversion, ITU-R BS.775 surround downmixing, EBU R128 `loudnorm` loudness normalization, and AAC / AC3 encoding.
+* **[MKVToolNix](https://github.com/mbunkus/mkvtoolnix)** by **[Moritz Bunkus](https://github.com/mbunkus)** (*GPLv2*) -- Matroska multimedia manipulation suite (`mkvmerge`, `mkvpropedit`, `mkvextract`) invoked as an external subprocess for final MKV multiplexing, visual-impaired (`flag-visual-impaired`) and commentary (`flag-commentary`) track flagging, and chapter extraction/injection.
+
+### Rust GUI, Vector & DSP Ecosystem
+* **[egui & eframe](https://github.com/emilk/egui)** by **[Emil Ernerfeldt (emilk)](https://github.com/emilk)** (*MIT / Apache-2.0*) -- Immediate-mode pure-Rust GUI library powering the ADMaster desktop studio.
+* **[resvg](https://github.com/linebender/resvg)** & **[tiny-skia](https://github.com/linebender/tiny-skia)** by **[Yevhenii Reizner](https://github.com/RazrFalcon) & the Linebender team** (*MIT / Apache-2.0*) -- Pure-Rust SVG parsing and high-precision 2D vector rasterization for crisp HiDPI icons.
+* **[RustFFT](https://github.com/ejmahler/RustFFT)** by **[Elliott Mahler (ejmahler)](https://github.com/ejmahler)** (*MIT / Apache-2.0*) -- SIMD-accelerated pure-Rust Fast Fourier Transform library used for 100-anchor sliding cross-correlation and STFT spectral landmark extraction.
+* **[Rayon](https://github.com/rayon-rs/rayon)** by **[Niko Matsakis](https://github.com/nikomatsakis) & [Josh Stone](https://github.com/cuviper)** (*MIT / Apache-2.0*) -- Data-parallel work-stealing concurrency library accelerating multi-core anchor correlation and Viterbi lattice scoring.
+* **[rfd (Rusty File Dialog)](https://github.com/PolyMeilex/rfd)** by **[PolyMeilex](https://github.com/PolyMeilex)** (*MIT*) -- Native cross-platform file and folder picker dialogs.
+* **[Crossbeam](https://github.com/crossbeam-rs/crossbeam)** by **The Crossbeam Project Developers** (*MIT / Apache-2.0*) -- Lock-free channels powering real-time pipeline event streaming between background DSP worker threads and the GUI.
+* **[Serde](https://github.com/serde-rs/serde)** & **[toml-rs](https://github.com/toml-rs/toml)** (*MIT / Apache-2.0*) -- Configuration serialization (`config.toml` and `sync_params.json` scratch caching).
+* **[Chrono](https://github.com/chronotope/chrono)** (*MIT / Apache-2.0*) -- Timestamp formatting for session logs and reports.
+* **[directories-rs](https://github.com/dirs-dev/directories-rs)** (*MIT / Apache-2.0*) -- Standard platform configuration directory resolution.
+* **[winresource](https://github.com/mxre/winresource)** (*MIT*) -- Build-time Windows PE executable icon and manifest embedding.
+
+---
+
+## Building from Source
+
 ```powershell
-python scripts/sync_ad_track.py "F:\uploads\queue" --batch --convert-main
-```
+# Run unit tests (PCHIP monotonicity, 3-band correlation, streaming WAV & gap fill):
+cargo test --release --locked
 
-### 3. Forced DTW Alignment for Alternate Cuts
-When syncing an AD track from a Theatrical Cut onto an Extended Cut Blu-ray:
-```powershell
-python scripts/sync_ad_track.py "F:\uploads\queue\Movie2" --force-dtw --no-pal
-```
-
-### 4. Fast 3-Minute Video Test Preview
-Multiplexes a 3-minute video sample to verify lip-sync before processing a full feature:
-```powershell
-python scripts/sync_ad_track.py "F:\uploads\queue\Movie1" --preview 180
-```
-
-### 5. Tagging Commentary Tracks Across a TV Show or Movie Library
-Scans MKV headers with `mkvmerge -J` and sets `flag-commentary=1` in-place without remuxing:
-```powershell
-python scripts/set_commentary_flags.py "X:\video\TV\Show_Title"
+# Build optimized release binaries (target/release/admaster.exe and admaster-cli.exe):
+cargo build --release --locked --bins
 ```
 
 ---
 
-## Alignment Strategies: Anchor Correlation vs. Native Warp (ADSync) vs. DescribeAlign DTW
+## License & Third-Party Notices
 
-| Feature / Metric | 100-Anchor Multiband Cross-Correlation (Default) | Native ADSync Warp (Default Non-Linear) | DescribeAlign DTW (Legacy Non-Linear) |
-| :--- | :--- | :--- | :--- |
-| **Best Used For** | Identical cuts (same edit, different audio delay or drift). | Alternate cuts (Theatrical vs Extended, TV trims, reel splices). | Secondary DTW comparison & legacy plot processing. |
-| **Narration Suppression** | **3-Band Filtering:** Low/High prioritized; speech band ($300\text{Hz}-1.2\text{kHz}$) downweighted to 0.2. | **Multiband Lattice Scoring:** Downweights narration speech to lock onto background soundtrack. | Single-band linear programming optimization. |
-| **Audio Integrity** | **100% Bit-Perfect Linear Passthrough:** Preserves decoded PCM samples bit-for-bit. Zero pitch/tempo warping. | **Continuous PCHIP Warp + WSOLA:** Sample-by-sample monotone mapping with pitch preservation. | **Piecewise Reconstruction:** Slices into discrete segments and crossfades transitions. |
-| **PAL Speed Probing** | **Acoustic Landmark Probing:** Automatically detects 25/24 speed differences in ~2 seconds. | **Acoustic Landmark Probing:** Automatically detects 25/24 speed differences in ~2 seconds. | Filename heuristics (`[UK]`, `[PAL]`) or linear drift slope fitting. |
-| **Execution Time** | **~2-4 seconds** via in-memory FFT arrays. | **~15-30 seconds** via Viterbi dynamic programming. | **1-3 minutes** per track (feature extraction + LP optimization). |
+**ADMaster** is Copyright (c) 2026 **torrq** and licensed under the [MIT License](LICENSE).
 
----
-
-## Audio Encoding & Downmixing Standards
-
-All stereo deliverables generated by this toolkit adhere strictly to international broadcast specifications:
-
-1. **ITU-R BS.775 True 2.0 Downmix Matrix**:
-   Surround audio tracks ($\ge 6$ channels) are folded down using the ITU standard formula with centered dialogue:
-   $$\text{Left} = L + 0.7071 \times C + 0.7071 \times L_s$$
-   $$\text{Right} = R + 0.7071 \times C + 0.7071 \times R_s$$
-2. **True 2.0 Stereo Deliverable**:
-   Applies the BS.775 matrix followed by `alimiter` clipping protection (`level_in=1:level_out=0.98:limit=0.98`) to preserve the natural dynamic range of theatrical mixes.
-3. **True 2.0 Night Mode Deliverable**:
-   Applies the BS.775 matrix followed by broadcast-standard EBU R128 loudness normalization (`loudnorm=I=-16:TP=-1.5:LRA=11`) with centered vocal clarity for nighttime or headphone listening.
-4. **Resampling Fidelity**:
-   Enforces bandlimited sinc/Fourier resampling (`scipy.signal.resample` / `soxr`) for genuine rate conversions (e.g. PAL 4.27% slowdowns) and bit-perfect passthrough for native 1.0x streams.
-
----
-
-## Configuration & Local Overrides
-
-This toolkit is fully portable and requires zero hardcoded paths. 
-
-To configure custom binary paths, encoding threads, or loudness targets:
-1. Copy [`config.default.json`](config.default.json) to `config.local.json` or `config.json` (which are ignored by `.gitignore`).
-2. Customize your settings (comments using `//` or `/* */` are supported):
-
-```jsonc
-{
-  // Path to custom FFmpeg binary (leave empty to auto-discover in ./bin/ or PATH)
-  "ffmpeg_path": "",
-
-  // Path to custom FFprobe binary (leave empty to auto-discover alongside FFmpeg)
-  "ffprobe_path": "",
-
-  // Path to MKVToolNix binaries (auto-discovers in ./bin/, Program Files, or PATH)
-  "mkvmerge_path": "",
-  "mkvpropedit_path": "",
-  "mkvextract_path": "",
-
-  // Path to ADSync repository or package (auto-discovers in sibling folders)
-  "adsync_path": "",
-
-  // Path to describealign.py script for legacy DTW alignment
-  "describealign_path": "",
-
-  // Default non-linear warp engine: "adsync" (default) or "describealign"
-  "default_warp_engine": "adsync",
-
-  // CPU threads for FFmpeg encoding
-  "default_threads": 2,
-
-  // Default target EBU R128 loudness (LUFS) and True Peak ceiling (dB)
-  "default_target_i": -16.0,
-  "default_target_tp": -1.5,
-
-  // Correlation anchors sampled across timeline (Default: 100)
-  "default_anchors": 100,
-
-  // Automatic acoustic feature detection
-  "default_multiband": true,
-  "default_speed_detect": true,
-
-  // Overwrite existing output files (default: false)
-  "default_overwrite": false,
-
-  // Enable verbose debug logging
-  "debug_mode": false
-}
-```
-
----
-
-## Setup & Requirements
-
-1. **Python**: Python 3.9+ with `numpy` and `scipy` installed:
-   ```powershell
-   pip install numpy scipy
-   ```
-2. **Binaries**: Place `ffmpeg.exe` and `ffprobe.exe` inside a `bin/` folder in the project root, or ensure they are available in your system `PATH`.
-3. **MKV Tools**: For commentary flagging and metadata inspection, install [MKVToolNix](https://mkvtoolnix.download/).
-
----
-
-## Upstream Attribution & Alignment Engines
-
-Non-linear audio alignment in **ADMaster** is powered by two complementary open-source engines:
-
-### 1. Primary Engine: [ADSync](https://github.com/JohnnyTheCoder1/ADSync) (Default)
-By **JohnnyTheCoder1**. **ADSync** provides state-of-the-art acoustic landmark fingerprinting, 3-band narration speech suppression, and dynamic programming on candidate lattices:
-* **Continuous Monotone PCHIP Cubic Spline Warping**: Maps timestamps smoothly without cutting audio into discrete blocks, eliminating splice glitch transients and clipped syllables.
-* **WSOLA Time-Stretching**: Preserves audio pitch and timbre across complex reel speed differences.
-* **Automatic Acoustic PAL / Speed Probing**: Identifies 25fps vs 23.976fps transfers in ~2 seconds using constellation hashes.
-* **Execution Speed**: High-performance alignment and rendering in **~15–30 seconds**.
-
-### 2. Secondary Engine: [DescribeAlign](https://github.com/julbean/describealign) (Legacy Option)
-By **julbean**. **DescribeAlign** formulates acoustic Dynamic Time Warping (DTW) as a linear programming optimization problem (`scipy.optimize.linprog`). 
-
-**ADMaster** feeds DescribeAlign warping vectors into our custom Multilayer post-processing pipeline ([`dtw_smooth_stitch.py`](scripts/README.md#4-dtw_smooth_stitchpy-dtw-transition-smoother)):
-1. **Plateau Consolidation**: Groups jittery DTW micro-segments sharing the same baseline offset ($\le 120\text{ms}$) into unified structural blocks, eliminating over 85% of phantom cuts.
-2. **Wobble Filtering (DTW Hallucination Correction)**: Rejects erratic offset drifts during musical overtures and silence gaps.
-3. **Master Audio Gap Filling**: Detects deleted scenes (timeline voids) in the AD track and smoothly blends volume-matched Blu-ray master audio across the void.
-4. **VAD Cut Nudging**: Evaluates narrator RMS energy ($\pm 500\text{ms}$ search window, 200ms hangover) to snap cut points to natural speech pauses.
-5. **Zero-Crossing Phase Snapping**: Micro-adjusts cut boundaries ($\pm 2\text{ms}$) to waveform zero crossings, eliminating DC pops.
-6. **Equal-Power Cosine Crossfades**: Blends segment junctions via 50ms constant-power crossfades ($\cos^2\theta + \sin^2\theta = 1$).
-
----
-
-## BatchEncoder Integration
-
-For GUI-based bulk processing, this project pairs excellently with **BatchEncoder**. We maintain a custom `FFMPEG_BLURAY_AAC.xml` format preset that replicates these exact downmix and loudness matrices (via a 1-pass approximation) directly inside the BatchEncoder GUI.
-
----
-
-## License
-
-This project and all included scripts are open-source and licensed under the [MIT License](LICENSE).
-
-*(For detailed architectural rules, LLM-agent instructions, and pipeline limitations, refer to [`AGENTS.md`](AGENTS.md))*
+Portions of the non-linear audio alignment pipeline in `src/dsp/` are adapted from **[ADSync](https://github.com/JohnnyTheCoder1/ADSync)**, Copyright (c) 2026 **Anilo ([JohnnyTheCoder1](https://github.com/JohnnyTheCoder1))**, licensed under the [MIT License](LICENSE). Full copyright and permission notices for ADSync and all third-party dependencies are included in [`LICENSE`](LICENSE) and inside the application's **About** screen.
