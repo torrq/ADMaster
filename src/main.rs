@@ -311,7 +311,16 @@ mod tests {
             |_, _| {},
         );
         let (pts, _) = decode_warp_path(&lattice, 0.0, Some(&fp));
-        let plan = fit_and_refine_warp(pts, dur_sec as f64, dur_sec as f64, &ref_sig, sr, 0.8, 0.6);
+        let plan = fit_and_refine_warp(
+            pts,
+            dur_sec as f64,
+            dur_sec as f64,
+            &ref_sig,
+            &ref_sig,
+            sr,
+            0.8,
+            0.6,
+        );
 
         let temp_dir = std::env::temp_dir().join("admaster_rust_tests");
         let _ = std::fs::remove_dir_all(&temp_dir);

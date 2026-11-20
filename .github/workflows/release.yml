@@ -194,33 +194,45 @@ jobs:
           generate_release_notes: false
           body: |
             ```text
-            ADMaster v2.0.2 Changelog
+            ADMaster v2.0.3 Changelog
             =========================
 
-            Output Format & Bitrate Controls (GUI + CLI)
-            --------------------------------------------
-            - Added a dedicated Output Format & Bitrate section under Settings ->
-              Encoding, defaulting to AAC (.m4a) @ 256 kbps with selectable switching
-              to WAV (.wav, 16-bit PCM with RF64 auto), Wave64 (.w64), FLAC (.flac),
-              MP3 (.mp3), AC3 (.ac3), EAC3 (.eac3), and Opus (.opus).
-            - Added codec-aware stereo bitrate selectors (128k-320k for AAC/MP3,
-              192k-640k for AC3, 128k-448k for EAC3, 96k-256k for Opus, and automatic
-              Lossless indicator for WAV/Wave64/FLAC), plus configurable 5.1 Surround
-              AC3 bitrate (384k / 448k / 640k) for Convert Main Audio deliverables.
-            - Replaced the standalone WAV toggle in the Workspace options bar with a
-              compact Format selector and wired live Step 2 "Saves as:" previews and
-              Settings output previews to reflect the active container and bitrate.
-            - Added CLI parity flags: --format <m4a|wav|w64|flac|mp3|ac3|eac3|opus>,
-              --bitrate <kbps>, and --surround-bitrate <kbps> (preserving --wav as a
-              shorthand for --format wav and automatically upgrading legacy config.toml
-              wav_output=true preferences).
+            Time-Warp Cut Accuracy, Seamless Gap Fills & Calibrated Confidence
+            ------------------------------------------------------------------
+            - Added acoustic cut-point pinpointing (+/-45s scan comparing pre-cut vs
+              post-cut reference correlation) before silence nudging so cut boundaries
+              never slide early into pre-cut dialogue or cause doubled audio, even
+              across long quiet scenes.
+            - Tightened silence nudging to a strict 0.018 RMS ceiling preferring
+              sustained sentence pauses (>=0.40s) so active narrator speech is never
+              mistaken for silence and cut mid-sentence.
+            - Added isolated false-match excursion pruning in vet_and_bridge (plus
+              iterative monotone DP re-solving) to eliminate repeated-music outlier
+              jumps and prevent synthetic bridge ramps from shattering into dozens of
+              false 1-point cuts.
+            - Upgraded Master Audio gap filling to 5ms void-edge resolution, subsumed
+              15ms warp edge fades to remove double-fade volume dips, added automatic
+              waveform polarity matching to prevent phase cancellation on phase-
+              inverted tracks, and widened equal-power cosine crossfades to >=85ms.
+            - Calibrated match confidence percentages for both Time-Warp (locked-window
+              coverage + narrator-calibrated signal quality + path stability) and
+              single-offset Correlation (anchor consensus + peak quality), with honest
+              verdict tiers (>=80% Strong, >=60% Good, >=35% Fair, <35% Needs Review).
 
-            Included From v2.0.1
-            --------------------
-            - Correlation & Time-Warp accuracy fixes verified on both US and UK tracks,
-              15x faster packed SIMD FFT + single-pass landmark matching, Layout C
-              Friendly Report Card UI, async ffprobe Match Against stream picker, dual
-              progress meters with clickable Elapsed <-> ETA timers, instant FFmpeg
-              cancellation, and customizable MKV-folder session logs.
+            Workspace UX, Progress Timers & Spot-Check Report Polish
+            --------------------------------------------------------
+            - Folder drops (and Open Movie Folder) now stage discovered movie and audio
+              tracks in Step 1 & Step 2 by default so you can review settings before
+              starting; added an opt-in "Auto-Start Sync When Dropping a Folder" toggle
+              under Settings -> Appearance & Logs.
+            - Redesigned the Overall and Current Task Elapsed/ETA timer pills with
+              matched column widths, aligned percentage readouts, a live Elapsed | ETA
+              header toggle, mathematically consistent Overall ETA >= Current Task ETA,
+              and a persistent Default Progress Timer setting.
+            - Replaced the wrapped gap/cut chip cloud in Sync Report with a clean,
+              chronological "Times to Spot-Check" checklist (deduplicating adjacent
+              gaps and cuts, with clickable copy-timestamp buttons and Copy List).
+            - Fixed ScrollArea clip-rect intersections so scrolled report headers stay
+              cleanly behind the top toolbar instead of overlaying it.
             ```
           files: dist/*

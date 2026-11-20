@@ -44,9 +44,19 @@ pub struct VisualColors {
 }
 
 fn conf_tier_color(conf: f64, pal: &VisualColors) -> Color32 {
-    if conf >= 0.45 {
+    if conf >= 0.60 {
         pal.success
-    } else if conf >= 0.18 {
+    } else if conf >= 0.35 {
+        pal.warning
+    } else {
+        pal.error
+    }
+}
+
+fn anchor_dot_color(raw_conf: f64, pal: &VisualColors) -> Color32 {
+    if raw_conf >= 0.45 {
+        pal.success
+    } else if raw_conf >= 0.18 {
         pal.warning
     } else {
         pal.error
@@ -54,11 +64,11 @@ fn conf_tier_color(conf: f64, pal: &VisualColors) -> Color32 {
 }
 
 fn conf_verdict_label(conf: f64) -> &'static str {
-    if conf >= 0.50 {
+    if conf >= 0.80 {
         "Strong Match"
-    } else if conf >= 0.25 {
+    } else if conf >= 0.60 {
         "Good Match"
-    } else if conf >= 0.15 {
+    } else if conf >= 0.35 {
         "Fair Match"
     } else {
         "Needs Review"
@@ -161,7 +171,7 @@ fn build_track_story(ad: &TrackSyncResult) -> TrackStory {
         "Playback stayed at native 1.0x speed (no pitch or tempo stretching)".to_string()
     };
 
-    let low_conf = ad.confidence < 0.18;
+    let low_conf = ad.confidence < 0.35;
 
     if ad.method == "warp" {
         let segs = ad.warp_cuts.len().max(1);
@@ -295,7 +305,7 @@ fn row_lr(
             .max_rect(rect)
             .layout(Layout::left_to_right(Align::Center)),
     );
-    row_ui.set_clip_rect(rect.expand(1.0));
+    row_ui.set_clip_rect(ui.clip_rect().intersect(rect.expand(1.0)));
     left(&mut row_ui);
     let rem = row_ui.available_rect_before_wrap();
     if rem.width() > 2.0 {
@@ -539,7 +549,7 @@ pub fn render_visual_results(
                                         .max_rect(left_rect)
                                         .layout(Layout::left_to_right(Align::Center)),
                                 );
-                                left_ui.set_clip_rect(left_rect);
+                                left_ui.set_clip_rect(ui.clip_rect().intersect(left_rect));
                                 left_ui.label(
                                     RichText::new("SYNC SUMMARY")
                                         .size(11.5)
@@ -751,7 +761,7 @@ fn render_checklist_card(
             .max_rect(inner_rect)
             .layout(Layout::top_down(Align::Min)),
     );
-    cell_ui.set_clip_rect(slot_rect.shrink(1.0));
+    cell_ui.set_clip_rect(ui.clip_rect().intersect(slot_rect.shrink(1.0)));
     row_lr(
         &mut cell_ui,
         20.0,
@@ -986,7 +996,7 @@ fn render_alignment_chart_card(
             };
 
             ui.label(
-                RichText::new(format!("Alignment Timeline -- [{}]", ad.name))
+                RichText::new(format!("Alignment Timeline -- {}", ad.name))
                     .size(13.5)
                     .strong()
                     .color(pal.text_primary),
@@ -1037,64 +1047,271 @@ fn render_alignment_chart_card(
                 },
             );
 
-            // Double-Check Cuts / Filled Gaps chips if present
-            if ad.warp_cuts.len() > 1 || !ad.filled_gaps.is_empty() {
-                ui.add_space(8.0);
+            // Clean chronological "Times to Spot-Check" checklist (merges overlapping gaps + cuts)
+            let spot_items = build_spot_check_items(ad, target_duration);
+            if !spot_items.is_empty() {
+                ui.add_space(10.0);
                 ui.separator();
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new("Double-Check Scene Transitions & Filled Gaps")
-                        .size(11.5)
-                        .strong()
-                        .color(pal.text_muted),
-                );
-                ui.add_space(4.0);
-                ui.horizontal_wrapped(|ui| {
-                    for (idx, g) in ad.filled_gaps.iter().enumerate() {
-                        let db_s = 20.0 * g.gain_start.log10();
-                        let txt = format!(
-                            "Gap #{}: {} -> {} ({:.1}s, {:+.1} dB)",
-                            idx + 1,
-                            format_hms_short(g.start_sec),
-                            format_hms_short(g.end_sec),
-                            g.duration_sec,
-                            db_s
-                        );
-                        Frame::none()
-                            .fill(pal.well)
-                            .rounding(Rounding::same(5.0))
-                            .stroke(Stroke::new(1.0_f32, pal.warning))
-                            .inner_margin(Margin::symmetric(8.0, 4.0))
-                            .show(ui, |ui| {
-                                ui.label(
-                                    RichText::new(txt)
-                                        .size(11.5)
-                                        .monospace()
-                                        .color(pal.warning),
-                                );
-                            });
-                    }
-                    for cut in ad.warp_cuts.iter().skip(1).take(12) {
-                        let txt = format!(
-                            "Cut @ {}: shift {:+.2}s (new offset {:+.2}s)",
-                            format_hms_short(cut.vid_start),
-                            -cut.jump,
-                            -cut.offset
-                        );
-                        Frame::none()
-                            .fill(pal.well)
-                            .rounding(Rounding::same(5.0))
+                ui.add_space(8.0);
+                render_spot_check_list(ui, inner_w, &spot_items, pal);
+            }
+        });
+}
+
+struct SpotCheckItem {
+    time_sec: f64,
+    timestamp: String,
+    badge: &'static str,
+    badge_kind: u8, // 0 = filled scene (warning), 1 = intro/outro (muted), 2 = timing shift (accent)
+    summary: String,
+    tooltip: String,
+}
+
+fn build_spot_check_items(ad: &TrackSyncResult, target_duration: f64) -> Vec<SpotCheckItem> {
+    let mut items: Vec<SpotCheckItem> = Vec::new();
+    let mut gap_spans: Vec<(f64, f64, usize)> = Vec::new();
+
+    for g in &ad.filled_gaps {
+        let is_intro = g.start_sec <= 5.0;
+        let is_outro = target_duration > 30.0 && g.end_sec >= target_duration - 15.0;
+        let (badge, badge_kind, desc) = if is_intro {
+            (
+                "Intro Fill",
+                1u8,
+                format!(
+                    "{:.1}s intro filled with movie audio ({} -> {})",
+                    g.duration_sec,
+                    format_hms_short(g.start_sec),
+                    format_hms_short(g.end_sec)
+                ),
+            )
+        } else if is_outro {
+            (
+                "Outro Fill",
+                1u8,
+                format!(
+                    "{:.1}s end section filled with movie audio ({} -> {})",
+                    g.duration_sec,
+                    format_hms_short(g.start_sec),
+                    format_hms_short(g.end_sec)
+                ),
+            )
+        } else {
+            (
+                "Filled Scene",
+                0u8,
+                format!(
+                    "{:.1}s missing scene filled with movie audio ({} -> {})",
+                    g.duration_sec,
+                    format_hms_short(g.start_sec),
+                    format_hms_short(g.end_sec)
+                ),
+            )
+        };
+        let db_s = 20.0 * g.gain_start.log10();
+        let tooltip = format!(
+            "{} -> {} ({:.1}s) | Level match: {:+.1} dB",
+            format_hms_short(g.start_sec),
+            format_hms_short(g.end_sec),
+            g.duration_sec,
+            db_s
+        );
+        let idx = items.len();
+        items.push(SpotCheckItem {
+            time_sec: g.start_sec,
+            timestamp: format_hms_short(g.start_sec),
+            badge,
+            badge_kind,
+            summary: desc,
+            tooltip,
+        });
+        gap_spans.push((g.start_sec, g.end_sec, idx));
+    }
+
+    // Merge nearby cuts into their matching gap row so each transition appears once;
+    // list standalone timing shifts that didn't require gap filling as their own row.
+    for cut in ad.warp_cuts.iter().skip(1) {
+        let mut merged_into = None;
+        for &(gs, ge, item_idx) in &gap_spans {
+            if cut.vid_start >= gs - 4.0 && cut.vid_start <= ge + 6.0 {
+                merged_into = Some(item_idx);
+                break;
+            }
+        }
+        if let Some(idx) = merged_into {
+            items[idx].tooltip.push_str(&format!(
+                " | Timing shift: {:+.2}s (offset {:+.2}s)",
+                -cut.jump, -cut.offset
+            ));
+        } else if cut.jump.abs() >= 0.25 {
+            items.push(SpotCheckItem {
+                time_sec: cut.vid_start,
+                timestamp: format_hms_short(cut.vid_start),
+                badge: "Timing Shift",
+                badge_kind: 2u8,
+                summary: format!("Timing adjusted by {:+.2}s at scene transition", -cut.jump),
+                tooltip: format!(
+                    "Cut at {} | Shift {:+.2}s -> new offset {:+.2}s",
+                    format_hms_short(cut.vid_start),
+                    -cut.jump,
+                    -cut.offset
+                ),
+            });
+        }
+    }
+
+    items.sort_by(|a, b| {
+        a.time_sec
+            .partial_cmp(&b.time_sec)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    items
+}
+
+fn render_spot_check_list(
+    ui: &mut egui::Ui,
+    inner_w: f32,
+    items: &[SpotCheckItem],
+    pal: &VisualColors,
+) {
+    row_lr(
+        ui,
+        24.0,
+        |ui| {
+            ui.label(
+                RichText::new(format!("Times to Spot-Check ({})", items.len()))
+                    .size(13.5)
+                    .strong()
+                    .color(pal.text_primary),
+            );
+            ui.label(
+                RichText::new("-- click any timestamp to copy")
+                    .size(12.0)
+                    .color(pal.text_muted),
+            );
+        },
+        |ui| {
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("Copy List").size(11.5))
+                        .min_size(Vec2::new(76.0, 22.0)),
+                )
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .on_hover_text("Copy all spot-check timestamps and notes to clipboard")
+                .clicked()
+            {
+                let mut text = String::new();
+                for item in items {
+                    text.push_str(&format!(
+                        "{}  [{}]  {}\n",
+                        item.timestamp, item.badge, item.summary
+                    ));
+                }
+                ui.ctx().copy_text(text);
+            }
+        },
+    );
+
+    ui.add_space(6.0);
+
+    Frame::none()
+        .fill(pal.well)
+        .rounding(Rounding::same(8.0))
+        .stroke(Stroke::new(1.0_f32, pal.border))
+        .inner_margin(Margin::symmetric(10.0, 6.0))
+        .show(ui, |ui| {
+            ui.set_width((inner_w - 22.0).max(200.0));
+            for (idx, item) in items.iter().enumerate() {
+                if idx > 0 {
+                    ui.separator();
+                }
+                let (badge_bg, badge_fg) = match item.badge_kind {
+                    0 => (
+                        Color32::from_rgba_unmultiplied(
+                            pal.warning.r(),
+                            pal.warning.g(),
+                            pal.warning.b(),
+                            if pal.dark { 40 } else { 26 },
+                        ),
+                        pal.warning,
+                    ),
+                    2 => (
+                        Color32::from_rgba_unmultiplied(
+                            pal.accent.r(),
+                            pal.accent.g(),
+                            pal.accent.b(),
+                            if pal.dark { 40 } else { 24 },
+                        ),
+                        pal.accent,
+                    ),
+                    _ => (pal.surface_alt, pal.text_muted),
+                };
+
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    ui.set_min_height(28.0);
+
+                    // Row index
+                    ui.add_sized(
+                        Vec2::new(22.0, 22.0),
+                        egui::Label::new(
+                            RichText::new(format!("#{}", idx + 1))
+                                .size(11.5)
+                                .monospace()
+                                .color(pal.text_muted),
+                        ),
+                    );
+
+                    // High-contrast clickable timestamp button
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(&item.timestamp)
+                                    .font(FontId::monospace(13.0))
+                                    .strong()
+                                    .color(pal.text_primary),
+                            )
+                            .fill(pal.surface)
                             .stroke(Stroke::new(1.0_f32, pal.border))
-                            .inner_margin(Margin::symmetric(8.0, 4.0))
-                            .show(ui, |ui| {
-                                ui.label(
-                                    RichText::new(txt)
-                                        .size(11.5)
-                                        .monospace()
-                                        .color(pal.text_primary),
-                                );
-                            });
+                            .rounding(Rounding::same(5.0))
+                            .min_size(Vec2::new(82.0, 24.0)),
+                        )
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text(format!("Click to copy {} to clipboard", item.timestamp))
+                        .clicked()
+                    {
+                        ui.ctx().copy_text(item.timestamp.clone());
                     }
+
+                    // Fixed-width crisp type badge so all descriptions align vertically
+                    let badge_size = Vec2::new(92.0, 22.0);
+                    let (b_rect, _) = ui.allocate_exact_size(badge_size, Sense::hover());
+                    ui.painter()
+                        .rect_filled(b_rect, Rounding::same(5.0), badge_bg);
+                    let b_galley = ui.painter().layout_no_wrap(
+                        item.badge.to_string(),
+                        FontId::proportional(11.5),
+                        badge_fg,
+                    );
+                    ui.painter().galley(
+                        Pos2::new(
+                            b_rect.center().x - b_galley.size().x * 0.5,
+                            b_rect.center().y - b_galley.size().y * 0.5,
+                        ),
+                        b_galley,
+                        badge_fg,
+                    );
+
+                    // Clean plain-English description with full technical detail on hover
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(&item.summary)
+                                .size(13.0)
+                                .color(pal.text_primary),
+                        )
+                        .truncate(),
+                    )
+                    .on_hover_text(&item.tooltip);
                 });
             }
         });
@@ -1250,11 +1467,11 @@ fn paint_offset_timeline_chart(
         );
     }
 
-    // Draw correlation anchor dots colored by confidence
+    // Draw correlation anchor dots colored by raw per-anchor correlation
     for m in &ad.anchor_measurements {
         let pos = Pos2::new(x_for_t(m.anchor_sec), y_for_off(m.offset_sec));
         if plot.contains(pos) {
-            let col = conf_tier_color(m.confidence, pal);
+            let col = anchor_dot_color(m.confidence, pal);
             painter.circle_filled(pos, 3.2, col);
         }
     }

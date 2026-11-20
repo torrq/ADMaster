@@ -78,9 +78,10 @@ pub fn fill_master_audio_gaps_windowed(
     let sr = ad_reader.layout.sample_rate;
     let sr_f = sr as f64;
     let target_len = ad_reader.layout.total_frames.min(ref_reader.layout.total_frames);
-    let win_frames = ((0.05 * sr_f) as usize).max(1); // 50ms analysis window
+    let win_frames = ((0.05 * sr_f) as usize).max(1); // 50ms RMS gain window
+    let void_win = ((0.005 * sr_f) as usize).max(1); // 5ms fine void-edge resolution (prevents 30-49ms truncation holes)
 
-    // 1. Identify true silent voids within candidate gap intervals by seeking only to each candidate gap!
+    // 1. Identify true silent voids within candidate gap intervals at 5ms resolution!
     let mut safe_gaps: Vec<(f64, f64)> = Vec::new();
     let mut ad_buf = Vec::new();
     let mut ref_buf = Vec::new();
@@ -92,22 +93,23 @@ pub fn fill_master_audio_gaps_windowed(
             continue;
         }
         let count = (end_frame - start_frame) as usize;
-        if count < win_frames {
+        if count < void_win {
             continue;
         }
         let n_ad = ad_reader.read_frames_stereo_f32(start_frame, count, &mut ad_buf)?;
         let n_ref = ref_reader.read_frames_stereo_f32(start_frame, count, &mut ref_buf)?;
         let n_frames = n_ad.min(n_ref);
-        let n_wins = n_frames / win_frames;
+        let n_wins = n_frames / void_win;
         if n_wins == 0 {
             continue;
         }
 
         let mut in_void = false;
         let mut v_start = 0usize;
+        let mut ref_active_in_void = false;
         for w in 0..n_wins {
-            let ad_w = &ad_buf[w * win_frames * 2..(w + 1) * win_frames * 2];
-            let ref_w = &ref_buf[w * win_frames * 2..(w + 1) * win_frames * 2];
+            let ad_w = &ad_buf[w * void_win * 2..(w + 1) * void_win * 2];
+            let ref_w = &ref_buf[w * void_win * 2..(w + 1) * void_win * 2];
 
             let mut ad_sq = 0.0_f64;
             let mut ad_peak = 0.0_f32;
@@ -126,23 +128,32 @@ pub fn fill_master_audio_gaps_windowed(
             }
             let ref_rms = (ref_sq / (ref_w.len() as f64)).sqrt();
 
-            let is_silent = ad_peak < 0.015 && ad_rms < 0.003 && ref_rms >= 0.0005;
-            if is_silent && !in_void {
-                in_void = true;
-                v_start = w;
-            } else if !is_silent && in_void {
+            // Check only AD silence per 5ms window so brief quiet moments in the reference audio
+            // never split a continuous gap and leave an unfilled mute tail; verify ref has audio
+            // somewhere inside the void before queuing it for fill.
+            let is_ad_silent = ad_peak < 0.018 && ad_rms < 0.004;
+            if is_ad_silent {
+                if !in_void {
+                    in_void = true;
+                    v_start = w;
+                    ref_active_in_void = false;
+                }
+                if ref_rms >= 0.0005 {
+                    ref_active_in_void = true;
+                }
+            } else if in_void {
                 in_void = false;
-                let sub_s = s + ((v_start * win_frames) as f64) / sr_f;
-                let sub_e = s + ((w * win_frames) as f64) / sr_f;
-                if sub_e - sub_s >= 0.40 {
+                let sub_s = s + ((v_start * void_win) as f64) / sr_f;
+                let sub_e = s + ((w * void_win) as f64) / sr_f;
+                if ref_active_in_void && sub_e - sub_s >= 0.35 {
                     safe_gaps.push((sub_s, sub_e));
                 }
             }
         }
         if in_void {
-            let sub_s = s + ((v_start * win_frames) as f64) / sr_f;
-            let sub_e = s + ((n_wins * win_frames) as f64) / sr_f;
-            if sub_e - sub_s >= 0.40 {
+            let sub_s = s + ((v_start * void_win) as f64) / sr_f;
+            let sub_e = s + (n_frames as f64) / sr_f;
+            if ref_active_in_void && sub_e - sub_s >= 0.35 {
                 safe_gaps.push((sub_s, sub_e));
             }
         }
@@ -191,7 +202,11 @@ pub fn fill_master_audio_gaps_windowed(
     };
 
     // 3. Measure neighboring 4-second regions and patch only the gap intervals directly in place!
-    let fade_frames = ((sr as usize) * (crossfade_ms as usize)) / 1000;
+    // Use at least an 85ms equal-power cosine crossfade and expand interior edges by 15ms so
+    // warp.rs's 15ms silence edge fades are completely subsumed (no double-fade volume notch!).
+    let eff_xf_ms = crossfade_ms.max(85);
+    let fade_frames = ((sr as usize) * (eff_xf_ms as usize)) / 1000;
+    let edge_subsume = ((sr as u64) * 15) / 1000;
     let neighbor_frames = (sr as u64) * 4;
     let data_offset = ad_reader.layout.data_offset;
     let ad_ch = ad_reader.layout.channels as usize;
@@ -211,11 +226,23 @@ pub fn fill_master_audio_gaps_windowed(
     let mut pcm_out_bytes = Vec::new();
 
     for (s, e) in safe_gaps {
-        let start_idx = ((s * sr_f) as u64).min(target_len);
-        let end_idx = ((e * sr_f) as u64).min(target_len);
-        if end_idx <= start_idx {
+        let raw_start = ((s * sr_f) as u64).min(target_len);
+        let raw_end = ((e * sr_f) as u64).min(target_len);
+        if raw_end <= raw_start {
             continue;
         }
+        // Subsume warp.rs's 15ms edge fade-out/fade-in on interior gap boundaries so crossfades
+        // blend full-level AD directly with full-level Reference audio without a -6dB dip.
+        let start_idx = if raw_start > edge_subsume {
+            raw_start - edge_subsume
+        } else {
+            raw_start
+        };
+        let end_idx = if raw_end + edge_subsume < target_len {
+            raw_end + edge_subsume
+        } else {
+            raw_end
+        };
 
         let pre_start = start_idx.saturating_sub(neighbor_frames);
         let pre_cnt = (start_idx - pre_start) as usize;
@@ -237,6 +264,10 @@ pub fn fill_master_audio_gaps_windowed(
         if end_idx >= target_len {
             g_end = g_start;
         }
+
+        // Match waveform polarity across the crossfade boundaries so phase-inverted tracks
+        // never suffer destructive phase cancellation right in the middle of the splice.
+        let polarity = detect_splice_polarity(&ad_pre_buf, &ref_pre_buf, &ad_post_buf, &ref_post_buf);
 
         // Read the full patch span including intro/outro crossfade margins
         let patch_start = start_idx.saturating_sub(fade_frames as u64);
@@ -282,7 +313,7 @@ pub fn fill_master_audio_gaps_windowed(
             let phase = (f as f32) / (intro_xf.max(1) as f32) * std::f32::consts::FRAC_PI_2;
             let fout = phase.cos();
             let fin = phase.sin();
-            let g = (g_start as f32) * peak_clamp;
+            let g = (g_start as f32) * peak_clamp * polarity;
             let idx = f * 2;
             ad_buf[idx] = ad_buf[idx] * fout + ref_buf[idx] * g * fin;
             ad_buf[idx + 1] = ad_buf[idx + 1] * fout + ref_buf[idx + 1] * g * fin;
@@ -295,7 +326,7 @@ pub fn fill_master_audio_gaps_windowed(
             } else {
                 0.0
             };
-            let g = ((g_start + frac * (g_end - g_start)) as f32) * peak_clamp;
+            let g = ((g_start + frac * (g_end - g_start)) as f32) * peak_clamp * polarity;
             let idx = (intro_xf + f) * 2;
             ad_buf[idx] = ref_buf[idx] * g;
             ad_buf[idx + 1] = ref_buf[idx + 1] * g;
@@ -306,7 +337,7 @@ pub fn fill_master_audio_gaps_windowed(
             let phase = (f as f32) / (outro_xf.max(1) as f32) * std::f32::consts::FRAC_PI_2;
             let fout = phase.cos();
             let fin = phase.sin();
-            let g = (g_end as f32) * peak_clamp;
+            let g = (g_end as f32) * peak_clamp * polarity;
             let idx = (intro_xf + gap_len + f) * 2;
             ad_buf[idx] = ref_buf[idx] * g * fout + ad_buf[idx] * fin;
             ad_buf[idx + 1] = ref_buf[idx + 1] * g * fout + ad_buf[idx + 1] * fin;
@@ -385,4 +416,45 @@ fn measure_region_gain(
     let ratio_local = rad_valid[p30_idx] / rref_valid[p30_idx].max(1e-6);
     let blended = 0.65 * ratio_local + 0.35 * default_gain;
     blended.clamp(0.4 * default_gain, 2.5 * default_gain)
+}
+
+/// Checks waveform polarity between AD and Reference audio immediately adjacent to a gap.
+/// Returns `-1.0` if the two tracks are strongly phase-inverted (`r < -0.15`) so crossfades
+/// sum constructively instead of phase-cancelling.
+fn detect_splice_polarity(
+    ad_pre: &[f32],
+    ref_pre: &[f32],
+    ad_post: &[f32],
+    ref_post: &[f32],
+) -> f32 {
+    let mut dot = 0.0_f64;
+    let mut a_sq = 0.0_f64;
+    let mut r_sq = 0.0_f64;
+
+    let n_pre = ad_pre.len().min(ref_pre.len());
+    // Inspect the last ~0.5s before the gap and first ~0.5s after the gap
+    let pre_take = n_pre.min(48_000);
+    for (&a, &r) in ad_pre[n_pre - pre_take..n_pre]
+        .iter()
+        .zip(ref_pre[n_pre - pre_take..n_pre].iter())
+    {
+        dot += (a as f64) * (r as f64);
+        a_sq += (a as f64) * (a as f64);
+        r_sq += (r as f64) * (r as f64);
+    }
+
+    let n_post = ad_post.len().min(ref_post.len());
+    let post_take = n_post.min(48_000);
+    for (&a, &r) in ad_post[..post_take].iter().zip(ref_post[..post_take].iter()) {
+        dot += (a as f64) * (r as f64);
+        a_sq += (a as f64) * (a as f64);
+        r_sq += (r as f64) * (r as f64);
+    }
+
+    let denom = (a_sq * r_sq).sqrt();
+    if denom > 1e-6 && (dot / denom) < -0.15 {
+        -1.0_f32
+    } else {
+        1.0_f32
+    }
 }

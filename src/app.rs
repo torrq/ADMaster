@@ -1,12 +1,13 @@
 use crate::config::{
-    AppConfig, OutputFormat, PalMode, SyncMode, ThemeMode, DEFAULT_LOG_FILENAME_PATTERN,
-    DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH,
-    SURROUND_BITRATE_OPTIONS,
+    AppConfig, OutputFormat, PalMode, SyncMode, ThemeMode, TimerDisplayMode,
+    DEFAULT_LOG_FILENAME_PATTERN, DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH, MIN_WINDOW_HEIGHT,
+    MIN_WINDOW_WIDTH, SURROUND_BITRATE_OPTIONS,
 };
 use crate::icon_svg::SvgIconCache;
 use crate::media::{probe_audio_streams, AudioStreamSummary, ToolPaths};
 use crate::pipeline::{
-    format_human_duration, spawn_pipeline_job, JobTarget, MovieJobReport, PipelineEvent,
+    auto_discover_inputs, discover_batch_queue_dirs, format_human_duration, spawn_pipeline_job,
+    JobTarget, MovieJobReport, PipelineEvent,
 };
 use crate::visual_ui::{
     render_visual_results, ResultsTab, VisualAction, VisualColors, VisualState,
@@ -67,7 +68,7 @@ impl SettingsSection {
             SettingsSection::Alignment => "Warp, anchors & PAL probe",
             SettingsSection::Deliverables => "Downmix, loudnorm & MKV",
             SettingsSection::ToolPaths => "FFmpeg & MKVToolNix paths",
-            SettingsSection::Appearance => "Theme, logs, threads & cache",
+            SettingsSection::Appearance => "Theme, drop behavior & logs",
         }
     }
 }
@@ -467,6 +468,7 @@ pub struct ADMasterApp {
     cancel_flag: Option<Arc<AtomicBool>>,
     job_start_instant: Option<Instant>,
     task_start_instant: Option<Instant>,
+    task_overall_start: f32,
     overall_fraction: f32,
     overall_label: String,
     active_stage_index: usize,
@@ -484,6 +486,8 @@ pub struct ADMasterApp {
     // Explicit input staging state
     explicit_ref: Option<PathBuf>,
     explicit_ads: Vec<(String, PathBuf)>,
+    staged_folder: Option<PathBuf>,
+    staged_batch_dirs: Vec<PathBuf>,
     probed_ref_for: Option<PathBuf>,
     probed_ref_streams: Vec<AudioStreamSummary>,
     stream_probe_rx: Option<Receiver<(PathBuf, Vec<AudioStreamSummary>)>>,
@@ -515,6 +519,7 @@ impl ADMasterApp {
         initial_target: Option<JobTarget>,
     ) -> Self {
         configure_theme_styles(&cc.egui_ctx, config.theme);
+        let init_show_eta = config.default_timer_mode == TimerDisplayMode::Eta;
         let mut app = Self {
             config,
             active_view: ActiveView::Workspace,
@@ -526,12 +531,13 @@ impl ADMasterApp {
             cancel_flag: None,
             job_start_instant: None,
             task_start_instant: None,
+            task_overall_start: 0.0,
             overall_fraction: 0.0,
             overall_label: String::new(),
             active_stage_index: 0,
             stage_started_at: [None; 4],
             stage_elapsed_secs: [None; 4],
-            show_eta: false,
+            show_eta: init_show_eta,
             progress_completed: 0,
             progress_total: 100,
             current_step_label: String::new(),
@@ -541,6 +547,8 @@ impl ADMasterApp {
             live_tracks: Vec::new(),
             explicit_ref: None,
             explicit_ads: Vec::new(),
+            staged_folder: None,
+            staged_batch_dirs: Vec::new(),
             probed_ref_for: None,
             probed_ref_streams: Vec::new(),
             stream_probe_rx: None,
@@ -653,13 +661,13 @@ impl ADMasterApp {
 
     fn pick_movie_folder(&mut self) {
         if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-            self.enqueue_or_start_job(JobTarget::Directory(dir));
+            self.stage_dropped_directories(vec![dir]);
         }
     }
 
     fn pick_batch_queue_folder(&mut self) {
         if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-            self.enqueue_or_start_job(JobTarget::BatchQueue(dir));
+            self.stage_dropped_directories(vec![dir]);
         }
     }
 
@@ -674,6 +682,15 @@ impl ADMasterApp {
             )
             .pick_file()
         {
+            self.staged_batch_dirs.clear();
+            if self
+                .staged_folder
+                .as_ref()
+                .map(|d| !p.starts_with(d))
+                .unwrap_or(false)
+            {
+                self.staged_folder = None;
+            }
             self.explicit_ref = Some(p);
             self.update_staging_status();
         }
@@ -690,6 +707,7 @@ impl ADMasterApp {
             )
             .pick_files()
         {
+            self.staged_batch_dirs.clear();
             for f in files {
                 if !self.explicit_ads.iter().any(|(_, ex)| ex == &f) {
                     let lbl = f
@@ -783,6 +801,7 @@ impl ADMasterApp {
         self.cancel_flag = Some(cancel_flag.clone());
         self.job_start_instant = Some(now);
         self.task_start_instant = Some(now);
+        self.task_overall_start = 0.0;
         self.overall_fraction = 0.0;
         self.overall_label = format!("Starting {}...", label);
         self.active_stage_index = 0;
@@ -886,6 +905,7 @@ impl ADMasterApp {
                         }
                         if task_changed {
                             self.task_start_instant = Some(Instant::now());
+                            self.task_overall_start = overall_fraction.clamp(0.0, 1.0);
                         }
                         self.overall_label = overall_label;
                         self.overall_fraction = overall_fraction.clamp(0.0, 1.0);
@@ -950,6 +970,143 @@ impl ADMasterApp {
         }
     }
 
+    fn stage_single_folder(&mut self, dir: &Path) -> bool {
+        let (ref_file, ad_files) = auto_discover_inputs(dir);
+        if ref_file.is_none() && ad_files.is_empty() {
+            return false;
+        }
+        self.active_view = ActiveView::Workspace;
+        self.reports.clear();
+        self.console_log.clear();
+        self.staged_batch_dirs.clear();
+        self.staged_folder = Some(dir.to_path_buf());
+        self.explicit_ref = ref_file;
+        self.explicit_ads = ad_files;
+        self.last_was_error = false;
+        self.last_was_success = false;
+        let folder_name = dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Folder");
+        let n = self.explicit_ads.len();
+        let tracks_word = if n == 1 {
+            "1 audio track".to_string()
+        } else {
+            format!("{} audio tracks", n)
+        };
+        let movie_str = self
+            .explicit_ref
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            .unwrap_or("None found");
+        self.status_message = format!(
+            "Loaded folder '{}' -- Main Movie: {}  |  {} (click Start Sync when ready)",
+            folder_name, movie_str, tracks_word
+        );
+        true
+    }
+
+    fn stage_dropped_directories(&mut self, dirs: Vec<PathBuf>) {
+        if dirs.is_empty() {
+            return;
+        }
+        if self.config.auto_start_on_folder_drop {
+            for d in dirs {
+                self.enqueue_or_start_job(JobTarget::Directory(d));
+            }
+            return;
+        }
+        if self.is_running {
+            self.last_was_error = false;
+            self.last_was_success = false;
+            self.status_message =
+                "Sync in progress -- wait for it to finish before loading another folder."
+                    .to_string();
+            return;
+        }
+
+        let convert_main = self.config.convert_main || self.config.stereo_only;
+        if dirs.len() == 1 {
+            let dir = &dirs[0];
+            if self.stage_single_folder(dir) {
+                return;
+            }
+            let sub_movies = discover_batch_queue_dirs(dir, convert_main);
+            if sub_movies.len() == 1 && self.stage_single_folder(&sub_movies[0]) {
+                return;
+            }
+            if !sub_movies.is_empty() {
+                self.active_view = ActiveView::Workspace;
+                self.reports.clear();
+                self.console_log.clear();
+                self.explicit_ref = None;
+                self.explicit_ads.clear();
+                self.staged_folder = None;
+                self.staged_batch_dirs = sub_movies;
+                self.last_was_error = false;
+                self.last_was_success = false;
+                let folder_name = dir
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Folder");
+                self.status_message = format!(
+                    "Loaded {} movie folders from '{}' -- click Start Sync when ready.",
+                    self.staged_batch_dirs.len(),
+                    folder_name
+                );
+                return;
+            }
+            let folder_name = dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Folder");
+            self.last_was_error = true;
+            self.last_was_success = false;
+            self.status_message = format!(
+                "No video or audio files found in folder '{}'.",
+                folder_name
+            );
+            return;
+        }
+
+        // Multiple folders dropped at once
+        let mut valid_dirs: Vec<PathBuf> = Vec::new();
+        for d in dirs {
+            let (r, ads) = auto_discover_inputs(&d);
+            if r.is_some() || !ads.is_empty() {
+                valid_dirs.push(d);
+            } else {
+                for sub in discover_batch_queue_dirs(&d, convert_main) {
+                    if !valid_dirs.contains(&sub) {
+                        valid_dirs.push(sub);
+                    }
+                }
+            }
+        }
+        if valid_dirs.len() == 1 {
+            let _ = self.stage_single_folder(&valid_dirs[0]);
+        } else if !valid_dirs.is_empty() {
+            self.active_view = ActiveView::Workspace;
+            self.reports.clear();
+            self.console_log.clear();
+            self.explicit_ref = None;
+            self.explicit_ads.clear();
+            self.staged_folder = None;
+            self.staged_batch_dirs = valid_dirs;
+            self.last_was_error = false;
+            self.last_was_success = false;
+            self.status_message = format!(
+                "Loaded {} movie folders -- click Start Sync when ready.",
+                self.staged_batch_dirs.len()
+            );
+        } else {
+            self.last_was_error = true;
+            self.last_was_success = false;
+            self.status_message = "No video or audio files found in the dropped folders.".to_string();
+        }
+    }
+
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         if dropped.is_empty() {
@@ -967,15 +1124,14 @@ impl ADMasterApp {
             }
         }
         if !dirs.is_empty() {
-            for d in dirs {
-                self.enqueue_or_start_job(JobTarget::Directory(d));
-            }
+            self.stage_dropped_directories(dirs);
         } else if !files.is_empty() {
             if !self.is_running {
                 self.active_view = ActiveView::Workspace;
                 self.reports.clear();
                 self.console_log.clear();
             }
+            self.staged_batch_dirs.clear();
 
             let mut added_ref = false;
             let mut added_ads = 0usize;
@@ -998,6 +1154,14 @@ impl ADMasterApp {
                 );
 
                 if is_video_or_surround_master {
+                    if self
+                        .staged_folder
+                        .as_ref()
+                        .map(|d| !f.starts_with(d))
+                        .unwrap_or(false)
+                    {
+                        self.staged_folder = None;
+                    }
                     self.explicit_ref = Some(f);
                     added_ref = true;
                 } else if is_syncable_audio {
@@ -1226,7 +1390,8 @@ impl ADMasterApp {
                             && (!self.console_log.is_empty()
                                 || !self.reports.is_empty()
                                 || self.explicit_ref.is_some()
-                                || !self.explicit_ads.is_empty())
+                                || !self.explicit_ads.is_empty()
+                                || !self.staged_batch_dirs.is_empty())
                         {
                             if ui
                                 .add_enabled(
@@ -1241,6 +1406,8 @@ impl ADMasterApp {
                                 self.reports.clear();
                                 self.explicit_ref = None;
                                 self.explicit_ads.clear();
+                                self.staged_folder = None;
+                                self.staged_batch_dirs.clear();
                                 self.live_tracks.clear();
                                 self.status_message = "Ready. Drop a reference .mkv and audio tracks (.mp3, .m4a, .flac) to begin.".to_string();
                             }
@@ -1281,12 +1448,6 @@ impl ADMasterApp {
                         .job_start_instant
                         .map(|t| t.elapsed().as_secs_f64())
                         .unwrap_or(0.0);
-                    let overall_eta = if overall_raw >= 0.025 && overall_raw < 0.999 {
-                        Some(overall_elapsed * ((1.0 - (overall_raw as f64)) / (overall_raw as f64)))
-                    } else {
-                        None
-                    };
-
                     let total = self.progress_total.max(1);
                     let completed = self.progress_completed.min(total);
                     let task_raw = (completed as f32) / (total as f32);
@@ -1306,104 +1467,105 @@ impl ADMasterApp {
                         None
                     };
 
+                    let linear_overall_eta = if overall_raw >= 0.025 && overall_raw < 0.999 {
+                        Some(
+                            overall_elapsed
+                                * ((1.0 - (overall_raw as f64)) / (overall_raw as f64)),
+                        )
+                    } else {
+                        None
+                    };
+                    let overall_eta = match (linear_overall_eta, task_eta) {
+                        (Some(lin_ov), Some(tk)) => {
+                            let task_delta =
+                                (overall_raw - self.task_overall_start).max(0.0) as f64;
+                            let est_task_share =
+                                if (task_raw as f64) >= 0.05 && task_delta > 0.0005 {
+                                    (task_delta / (task_raw as f64))
+                                        .min((1.0 - (self.task_overall_start as f64)).max(0.0))
+                                } else {
+                                    0.0
+                                };
+                            let rem_after_task =
+                                (1.0 - (self.task_overall_start as f64) - est_task_share).max(0.0);
+                            let after_eta = if rem_after_task <= 0.005 {
+                                0.0
+                            } else if self.task_overall_start >= 0.05 {
+                                let prior_elapsed = (overall_elapsed - task_elapsed).max(0.0);
+                                let prior_rate = prior_elapsed / (self.task_overall_start as f64);
+                                let cur_rate = if est_task_share > 0.01 {
+                                    (task_elapsed + tk) / est_task_share
+                                } else {
+                                    prior_rate
+                                };
+                                rem_after_task * (0.5 * prior_rate + 0.5 * cur_rate)
+                            } else {
+                                (lin_ov - tk).max(0.0)
+                            };
+                            Some((tk + after_eta).max(tk))
+                        }
+                        (Some(lin_ov), None) => Some(lin_ov),
+                        (None, Some(tk)) => Some(tk),
+                        (None, None) => None,
+                    };
+
                     let mut flipped = false;
 
-                    // Meter 1: Overall Progress
-                    horizontal_row_lr(
+                    // Meter 1: Overall Progress (pre-reserve right side so long labels never clip %)
+                    let ov_text = if self.overall_label.is_empty() {
+                        "Running sync job..."
+                    } else {
+                        &self.overall_label
+                    };
+                    flipped |= paint_progress_meter_header(
                         ui,
-                        24.0,
-                        |ui| {
-                            paint_inline_badge(
-                                ui,
-                                "OVERALL",
-                                Color32::from_rgba_unmultiplied(
-                                    pal.accent.r(),
-                                    pal.accent.g(),
-                                    pal.accent.b(),
-                                    if pal.dark { 46 } else { 28 },
-                                ),
-                                pal.accent_hover,
-                            );
-                            let ov_text = if self.overall_label.is_empty() {
-                                "Running sync job..."
-                            } else {
-                                &self.overall_label
-                            };
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(ov_text)
-                                        .size(12.5)
-                                        .strong()
-                                        .color(pal.text_primary),
-                                )
-                                .truncate(),
-                            );
-                        },
-                        |ui| {
-                            flipped |= paint_clickable_timer_pill(
-                                ui,
-                                self.show_eta,
-                                "Elapsed",
-                                overall_elapsed,
-                                overall_eta,
-                                pal,
-                            );
-                            ui.label(
-                                RichText::new(format!("{}%", overall_pct))
-                                    .size(12.5)
-                                    .strong()
-                                    .monospace()
-                                    .color(pal.accent_hover),
-                            );
-                        },
+                        "OVERALL",
+                        Color32::from_rgba_unmultiplied(
+                            pal.accent.r(),
+                            pal.accent.g(),
+                            pal.accent.b(),
+                            if pal.dark { 46 } else { 28 },
+                        ),
+                        pal.accent_hover,
+                        ov_text,
+                        true,
+                        overall_pct,
+                        pal.accent_hover,
+                        self.show_eta,
+                        "ELAPSED",
+                        overall_elapsed,
+                        overall_eta,
+                        pal.accent,
+                        pal,
                     );
+                    ui.add_space(2.0);
                     paint_progress_bar(ui, overall_anim, 7.0, pal.accent, pal);
 
-                    ui.add_space(6.0);
+                    ui.add_space(7.0);
 
                     // Meter 2: Current Task Progress
-                    horizontal_row_lr(
+                    flipped |= paint_progress_meter_header(
                         ui,
-                        22.0,
-                        |ui| {
-                            paint_inline_badge(
-                                ui,
-                                "CURRENT TASK",
-                                Color32::from_rgba_unmultiplied(
-                                    pal.cyan_track.r(),
-                                    pal.cyan_track.g(),
-                                    pal.cyan_track.b(),
-                                    if pal.dark { 42 } else { 26 },
-                                ),
-                                pal.cyan_track,
-                            );
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(&self.current_step_label)
-                                        .size(12.0)
-                                        .color(pal.text_muted),
-                                )
-                                .truncate(),
-                            );
-                        },
-                        |ui| {
-                            flipped |= paint_clickable_timer_pill(
-                                ui,
-                                self.show_eta,
-                                "Task",
-                                task_elapsed,
-                                task_eta,
-                                pal,
-                            );
-                            ui.label(
-                                RichText::new(format!("{}%", task_pct))
-                                    .size(12.0)
-                                    .strong()
-                                    .monospace()
-                                    .color(pal.cyan_track),
-                            );
-                        },
+                        "CURRENT TASK",
+                        Color32::from_rgba_unmultiplied(
+                            pal.cyan_track.r(),
+                            pal.cyan_track.g(),
+                            pal.cyan_track.b(),
+                            if pal.dark { 42 } else { 26 },
+                        ),
+                        pal.cyan_track,
+                        &self.current_step_label,
+                        false,
+                        task_pct,
+                        pal.cyan_track,
+                        self.show_eta,
+                        "TASK",
+                        task_elapsed,
+                        task_eta,
+                        pal.cyan_track,
+                        pal,
                     );
+                    ui.add_space(2.0);
                     paint_progress_bar(ui, task_anim, 5.5, pal.cyan_track, pal);
 
                     if flipped {
@@ -1749,6 +1911,62 @@ impl ADMasterApp {
 
         let has_ref = self.explicit_ref.is_some();
         let has_ads = !self.explicit_ads.is_empty();
+
+        if !self.staged_batch_dirs.is_empty() {
+            let mut clear_batch = false;
+            Frame::none()
+                .fill(pal.surface)
+                .rounding(Rounding::same(10.0))
+                .stroke(Stroke::new(1.5_f32, pal.accent))
+                .inner_margin(Margin::symmetric(16.0, 10.0))
+                .show(ui, |ui| {
+                    ui.set_width(avail_w - 32.0);
+                    horizontal_row_lr(
+                        ui,
+                        24.0,
+                        |ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "Staged Movie Folders ({}) -- ready to sync",
+                                    self.staged_batch_dirs.len()
+                                ))
+                                .size(13.0)
+                                .strong()
+                                .color(pal.text_primary),
+                            );
+                        },
+                        |ui| {
+                            if ui.small_button("Clear Queue").clicked() {
+                                clear_batch = true;
+                            }
+                        },
+                    );
+                    ui.add_space(4.0);
+                    let names: Vec<String> = self
+                        .staged_batch_dirs
+                        .iter()
+                        .take(6)
+                        .map(|p| {
+                            p.file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("Folder")
+                                .to_string()
+                        })
+                        .collect();
+                    let extra = self.staged_batch_dirs.len().saturating_sub(names.len());
+                    let list_txt = if extra > 0 {
+                        format!("{} (+{} more)", names.join(", "), extra)
+                    } else {
+                        names.join(", ")
+                    };
+                    ui.label(RichText::new(list_txt).size(12.0).color(pal.text_muted));
+                });
+            if clear_batch {
+                self.staged_batch_dirs.clear();
+                self.update_staging_status();
+            }
+            ui.add_space(10.0);
+        }
 
         // =====================================================================
         // STEP 1 (TOP): MAIN MOVIE / VIDEO FILE
@@ -2386,8 +2604,10 @@ impl ADMasterApp {
         // =====================================================================
         // BOTTOM LAUNCH BAR (fixed 36px inner row height)
         // =====================================================================
-        let can_start = self.explicit_ref.is_some()
-            && (!self.explicit_ads.is_empty() || self.config.convert_main);
+        let has_batch = !self.staged_batch_dirs.is_empty();
+        let can_start = has_batch
+            || (self.explicit_ref.is_some()
+                && (!self.explicit_ads.is_empty() || self.config.convert_main));
 
         Frame::none()
             .fill(pal.surface)
@@ -2396,40 +2616,47 @@ impl ADMasterApp {
             .inner_margin(Margin::symmetric(18.0, 10.0))
             .show(ui, |ui| {
                 ui.set_width(avail_w - 36.0);
-                let summary = match (&self.explicit_ref, self.explicit_ads.len()) {
-                    (Some(r), n) if n > 0 => {
-                        let t_word = if n == 1 {
-                            "1 audio track".to_string()
-                        } else {
-                            format!("{} audio tracks", n)
-                        };
-                        format!(
-                            "Ready to sync {} to \"{}\"",
-                            t_word,
+                let summary = if has_batch {
+                    format!(
+                        "Ready to sync {} movie folders -- review options above and click Start Sync.",
+                        self.staged_batch_dirs.len()
+                    )
+                } else {
+                    match (&self.explicit_ref, self.explicit_ads.len()) {
+                        (Some(r), n) if n > 0 => {
+                            let t_word = if n == 1 {
+                                "1 audio track".to_string()
+                            } else {
+                                format!("{} audio tracks", n)
+                            };
+                            format!(
+                                "Ready to sync {} to \"{}\"",
+                                t_word,
+                                r.file_name().and_then(|s| s.to_str()).unwrap_or("Movie")
+                            )
+                        }
+                        (Some(r), 0) if self.config.convert_main => format!(
+                            "Ready to convert movie audio from \"{}\" (or add audio tracks in Step 2 to sync)",
                             r.file_name().and_then(|s| s.to_str()).unwrap_or("Movie")
-                        )
+                        ),
+                        (Some(_), 0) => {
+                            "Step 1 complete -- now drop or add at least one audio track (.mp3, .m4a, .flac) in Step 2 above."
+                                .to_string()
+                        }
+                        (None, n) if n > 0 => {
+                            let t_word = if n == 1 {
+                                "1 audio track".to_string()
+                            } else {
+                                format!("{} audio tracks", n)
+                            };
+                            format!(
+                                "{} added -- now drop or choose your Main Movie file (.mkv, .mp4) in Step 1 above.",
+                                t_word
+                            )
+                        }
+                        _ => "Drop a Main Movie file (.mkv) and Audio Tracks (.mp3, .m4a, .flac) above to get started."
+                            .to_string(),
                     }
-                    (Some(r), 0) if self.config.convert_main => format!(
-                        "Ready to convert movie audio from \"{}\" (or add audio tracks in Step 2 to sync)",
-                        r.file_name().and_then(|s| s.to_str()).unwrap_or("Movie")
-                    ),
-                    (Some(_), 0) => {
-                        "Step 1 complete -- now drop or add at least one audio track (.mp3, .m4a, .flac) in Step 2 above."
-                            .to_string()
-                    }
-                    (None, n) if n > 0 => {
-                        let t_word = if n == 1 {
-                            "1 audio track".to_string()
-                        } else {
-                            format!("{} audio tracks", n)
-                        };
-                        format!(
-                            "{} added -- now drop or choose your Main Movie file (.mkv, .mp4) in Step 1 above.",
-                            t_word
-                        )
-                    }
-                    _ => "Drop a Main Movie file (.mkv) and Audio Tracks (.mp3, .m4a, .flac) above to get started."
-                        .to_string(),
                 };
                 horizontal_row_lr(
                     ui,
@@ -2447,7 +2674,9 @@ impl ADMasterApp {
                         );
                     },
                     |ui| {
-                        let btn_text = if self.explicit_ads.len() > 1 {
+                        let btn_text = if has_batch {
+                            format!("Start Sync ({} Folders)", self.staged_batch_dirs.len())
+                        } else if self.explicit_ads.len() > 1 {
                             format!("Start Sync ({} Tracks)", self.explicit_ads.len())
                         } else if self.explicit_ads.len() == 1 {
                             "Start Sync (1 Track)".to_string()
@@ -2462,13 +2691,34 @@ impl ADMasterApp {
                             )
                             .clicked()
                         {
-                            if let Some(ref rp) = self.explicit_ref {
+                            if has_batch {
+                                let dirs = std::mem::take(&mut self.staged_batch_dirs);
+                                for d in dirs {
+                                    self.enqueue_or_start_job(JobTarget::Directory(d));
+                                }
+                            } else if let Some(ref rp) = self.explicit_ref {
+                                let matched_folder = self
+                                    .staged_folder
+                                    .as_ref()
+                                    .filter(|dir| rp.starts_with(dir))
+                                    .cloned();
+                                let title = matched_folder.as_ref().and_then(|dir| {
+                                    dir.file_name()
+                                        .and_then(|s| s.to_str())
+                                        .map(|s| s.to_string())
+                                });
+                                let out_dir = matched_folder
+                                    .as_ref()
+                                    .filter(|_| self.config.custom_output_dir.trim().is_empty())
+                                    .map(|dir| dir.join("output"));
+                                let scratch_dir =
+                                    matched_folder.as_ref().map(|dir| dir.join("scratch"));
                                 self.start_job(JobTarget::Explicit {
                                     ref_path: rp.clone(),
                                     ad_paths: self.explicit_ads.clone(),
-                                    title: None,
-                                    out_dir: None,
-                                    scratch_dir: None,
+                                    title,
+                                    out_dir,
+                                    scratch_dir,
                                     mux_video_path: None,
                                 });
                             }
@@ -2518,11 +2768,52 @@ impl ADMasterApp {
                                 );
                             },
                             |ui| {
-                                ui.label(
-                                    RichText::new("Tip: Click any bottom timer pill to flip Elapsed <-> ETA")
-                                        .size(11.5)
-                                        .color(pal.text_muted),
-                                );
+                                // Compact segmented Elapsed | ETA switcher
+                                Frame::none()
+                                    .fill(pal.well)
+                                    .rounding(Rounding::same(6.0))
+                                    .stroke(Stroke::new(1.0_f32, pal.border))
+                                    .inner_margin(Margin::same(2.0))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 2.0;
+                                            for (is_eta, lbl) in [(false, "Elapsed"), (true, "ETA")]
+                                            {
+                                                let active = self.show_eta == is_eta;
+                                                let fill = if active {
+                                                    pal.accent
+                                                } else {
+                                                    Color32::TRANSPARENT
+                                                };
+                                                let fg = if active {
+                                                    Color32::WHITE
+                                                } else {
+                                                    pal.text_muted
+                                                };
+                                                if ui
+                                                    .add(
+                                                        egui::Button::new(
+                                                            RichText::new(lbl)
+                                                                .size(11.0)
+                                                                .strong()
+                                                                .color(fg),
+                                                        )
+                                                        .fill(fill)
+                                                        .stroke(Stroke::NONE)
+                                                        .rounding(Rounding::same(4.0))
+                                                        .min_size(Vec2::new(54.0, 20.0)),
+                                                    )
+                                                    .on_hover_cursor(CursorIcon::PointingHand)
+                                                    .on_hover_text(
+                                                        "Toggle bottom progress timers between Elapsed time and ETA (change default in Settings)",
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    self.show_eta = is_eta;
+                                                }
+                                            }
+                                        });
+                                    });
                             },
                         );
 
@@ -2616,7 +2907,7 @@ impl ADMasterApp {
                                     .max_rect(inner_slot)
                                     .layout(Layout::top_down(Align::Min)),
                             );
-                            cell_ui.set_clip_rect(slot_rect.shrink(1.0));
+                            cell_ui.set_clip_rect(ui.clip_rect().intersect(slot_rect.shrink(1.0)));
                             horizontal_row_lr(
                                 &mut cell_ui,
                                 20.0,
@@ -2989,7 +3280,7 @@ impl ADMasterApp {
                     .max_rect(nav_rect.shrink2(Vec2::new(12.0, 14.0)))
                     .layout(Layout::top_down(Align::Min)),
             );
-            nav_ui.set_clip_rect(nav_rect.shrink2(Vec2::new(4.0, 0.0)));
+            nav_ui.set_clip_rect(ui.clip_rect().intersect(nav_rect.shrink2(Vec2::new(4.0, 0.0))));
             nav_ui.spacing_mut().item_spacing = Vec2::new(0.0, 4.0);
 
             nav_ui.label(
@@ -3721,8 +4012,8 @@ impl ADMasterApp {
         settings_card(
             ui,
             pal,
-            "Theme & Window Geometry",
-            "Visual presentation and window state persistence.",
+            "Theme, Behavior & Window Geometry",
+            "Visual presentation, folder drop behavior, and window state persistence.",
             |ui| {
                 setting_row(
                     ui,
@@ -3745,6 +4036,42 @@ impl ADMasterApp {
                             }
                         });
                     },
+                );
+
+                ui.separator();
+
+                setting_row(
+                    ui,
+                    pal,
+                    "Default Progress Timer",
+                    "Choose whether the progress bars display Time Elapsed or Estimated Time Left (ETA) by default",
+                    "You can still flip between Elapsed and ETA at any time while syncing by clicking the timer pill.",
+                    |ui| {
+                        ui.horizontal(|ui| {
+                            for &mode in TimerDisplayMode::all() {
+                                let selected = self.config.default_timer_mode == mode;
+                                if ui
+                                    .add(egui::Button::new(mode.label()).selected(selected))
+                                    .clicked()
+                                {
+                                    self.config.default_timer_mode = mode;
+                                    self.show_eta = mode == TimerDisplayMode::Eta;
+                                    changed = true;
+                                }
+                            }
+                        });
+                    },
+                );
+
+                ui.separator();
+
+                changed |= checkbox_row_tip(
+                    ui,
+                    &mut self.config.auto_start_on_folder_drop,
+                    "Auto-Start Sync When Dropping a Folder",
+                    "Start syncing immediately when a movie folder is dropped instead of staging its files in Step 1 & Step 2 first",
+                    "Off by default so you can inspect the matched movie stream, output format, and options before clicking Start Sync.",
+                    pal,
                 );
 
                 ui.separator();
@@ -4266,7 +4593,7 @@ impl ADMasterApp {
     ) {
         ui.label(
             RichText::new(
-                "Automatically aligns Audio Description tracks to reference HD and UHD MKV masters, correcting speed differences, alternate cuts, and missing scenes before rendering broadcast-ready stereo deliverables.",
+                "Automatically aligns Audio Description tracks to reference video masters, correcting speed differences, alternate cuts, and missing scenes before rendering broadcast-ready stereo deliverables.",
             )
             .size(13.0)
             .color(pal.text_primary),
@@ -4575,39 +4902,204 @@ fn about_kv_row(
     });
 }
 
-fn paint_clickable_timer_pill(
+#[allow(clippy::too_many_arguments)]
+fn paint_progress_meter_header(
     ui: &mut egui::Ui,
+    badge_text: &str,
+    badge_bg: Color32,
+    badge_fg: Color32,
+    label_text: &str,
+    label_strong: bool,
+    pct: u32,
+    pct_color: Color32,
     show_eta: bool,
-    elapsed_prefix: &str,
+    elapsed_tag: &str,
     elapsed_secs: f64,
     eta_secs: Option<f64>,
+    accent: Color32,
     pal: &Palette,
 ) -> bool {
-    let text = if show_eta {
+    let row_w = ui.available_width().max(180.0);
+    let row_h = 24.0_f32;
+    let (row_rect, _) = ui.allocate_exact_size(Vec2::new(row_w, row_h), Sense::hover());
+
+    // 1. Pre-measure the right-side two-segment timer pill + percentage so long labels
+    //    truncate cleanly and never clip or squeeze the timer!
+    let mode_tag = if show_eta { "ETA" } else { elapsed_tag };
+    let val_text = if show_eta {
         match eta_secs {
-            Some(rem) if rem.is_finite() => format!("ETA: ~{} left", format_human_duration(rem)),
-            _ => "ETA: calculating...".to_string(),
+            Some(rem) if rem.is_finite() => format!("~{}", format_human_duration(rem)),
+            _ => "Estimating...".to_string(),
         }
     } else {
-        format!("{}: {}", elapsed_prefix, format_human_duration(elapsed_secs))
+        format_human_duration(elapsed_secs)
     };
-    let tooltip = if show_eta {
-        "Showing estimated time remaining -- click to switch to Elapsed time"
+
+    let tag_font = FontId::proportional(10.0);
+    let val_font = FontId::monospace(11.5);
+    let pct_font = FontId::monospace(12.0);
+
+    let tag_galley = ui
+        .painter()
+        .layout_no_wrap(mode_tag.to_string(), tag_font, pal.text_primary);
+    let val_galley = ui
+        .painter()
+        .layout_no_wrap(val_text, val_font, pal.text_primary);
+    let pct_galley = ui
+        .painter()
+        .layout_no_wrap(format!("{:3}%", pct), pct_font, pct_color);
+
+    // Fixed, identical column widths across Overall and Current Task rows so both timer pills,
+    // their internal dividers, and the percentage column stay perfectly aligned vertically.
+    const TAG_SEG_W: f32 = 62.0;
+    const VAL_SEG_W: f32 = 108.0;
+    const PCT_COL_W: f32 = 38.0;
+    let tag_seg_w = TAG_SEG_W;
+    let val_seg_w = VAL_SEG_W;
+    let pill_w = tag_seg_w + 1.0 + val_seg_w;
+    let pill_h = 21.0_f32;
+
+    let pill_rect = Rect::from_min_size(
+        Pos2::new(
+            row_rect.right() - pill_w,
+            row_rect.center().y - pill_h * 0.5,
+        ),
+        Vec2::new(pill_w, pill_h),
+    );
+    let pill_resp = ui
+        .interact(
+            pill_rect,
+            ui.id().with(badge_text).with("timer_pill"),
+            Sense::click(),
+        )
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text(if show_eta {
+            "Showing estimated time remaining -- click to switch to Elapsed time"
+        } else {
+            "Showing elapsed time -- click to switch to ETA (estimated time remaining)"
+        });
+
+    let hovered = pill_resp.hovered();
+    let tag_tint = if show_eta {
+        Color32::from_rgba_unmultiplied(
+            accent.r(),
+            accent.g(),
+            accent.b(),
+            if pal.dark { 58 } else { 36 },
+        )
+    } else if pal.dark {
+        Color32::from_rgb(38, 46, 58)
     } else {
-        "Showing elapsed time -- click to switch to ETA (estimated time remaining)"
+        Color32::from_rgb(228, 234, 242)
     };
-    let border_col = if show_eta { pal.cyan_track } else { pal.border };
-    let text_col = if show_eta { pal.cyan_track } else { pal.text_primary };
-    ui.add(
-        egui::Button::new(RichText::new(text).font(FontId::monospace(11.5)).color(text_col))
-            .fill(pal.surface_alt)
-            .stroke(Stroke::new(1.0_f32, border_col))
-            .rounding(Rounding::same(5.0))
-            .min_size(Vec2::new(0.0, 20.0)),
-    )
-    .on_hover_text(tooltip)
-    .on_hover_cursor(CursorIcon::PointingHand)
-    .clicked()
+    let pill_bg = if hovered { pal.surface } else { pal.well };
+    let pill_border = if hovered || show_eta {
+        Color32::from_rgba_unmultiplied(
+            accent.r(),
+            accent.g(),
+            accent.b(),
+            if hovered { 210 } else { 115 },
+        )
+    } else {
+        pal.border
+    };
+    let tag_fg = if show_eta {
+        if pal.dark {
+            Color32::WHITE
+        } else {
+            accent
+        }
+    } else {
+        pal.text_muted
+    };
+
+    // Outer pill container
+    ui.painter().rect_filled(pill_rect, Rounding::same(6.0), pill_bg);
+    // Left mode tag fill (rounded left corners only)
+    let tag_rect = Rect::from_min_max(
+        pill_rect.min,
+        Pos2::new(pill_rect.left() + tag_seg_w, pill_rect.bottom()),
+    );
+    ui.painter().rect_filled(
+        tag_rect,
+        Rounding {
+            nw: 5.5,
+            sw: 5.5,
+            ne: 0.0,
+            se: 0.0,
+        },
+        tag_tint,
+    );
+    // Crisp 1px vertical divider between mode tag and time readout
+    let div_x = pill_rect.left() + tag_seg_w;
+    ui.painter().line_segment(
+        [
+            Pos2::new(div_x, pill_rect.top() + 2.0),
+            Pos2::new(div_x, pill_rect.bottom() - 2.0),
+        ],
+        Stroke::new(1.0_f32, pal.border),
+    );
+    // Outer pill stroke
+    ui.painter()
+        .rect_stroke(pill_rect, Rounding::same(6.0), Stroke::new(1.0_f32, pill_border));
+
+    // Mode tag text (centered in tag_rect)
+    ui.painter().galley(
+        Pos2::new(
+            tag_rect.center().x - tag_galley.size().x * 0.5,
+            tag_rect.center().y - tag_galley.size().y * 0.5,
+        ),
+        tag_galley,
+        tag_fg,
+    );
+    // Time value text (centered in right segment)
+    let val_rect = Rect::from_min_max(
+        Pos2::new(div_x + 1.0, pill_rect.top()),
+        pill_rect.max,
+    );
+    ui.painter().galley(
+        Pos2::new(
+            val_rect.center().x - val_galley.size().x * 0.5,
+            val_rect.center().y - val_galley.size().y * 0.5,
+        ),
+        val_galley,
+        pal.text_primary,
+    );
+
+    // Percentage readout right-aligned in a fixed column directly to the left of the timer pill
+    let pct_gap = 10.0_f32;
+    let pct_right = pill_rect.left() - pct_gap;
+    let pct_pos = Pos2::new(
+        pct_right - pct_galley.size().x,
+        row_rect.center().y - pct_galley.size().y * 0.5,
+    );
+    ui.painter().galley(pct_pos, pct_galley, pct_color);
+
+    // 2. Left side: badge + truncated label cleanly bounded before percentage column
+    let left_rect = Rect::from_min_max(
+        row_rect.min,
+        Pos2::new(
+            (pct_right - PCT_COL_W - 10.0).max(row_rect.left() + 60.0),
+            row_rect.bottom(),
+        ),
+    );
+    let mut left_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(left_rect)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    left_ui.set_clip_rect(ui.clip_rect().intersect(left_rect));
+    left_ui.spacing_mut().item_spacing.x = 8.0;
+    paint_inline_badge(&mut left_ui, badge_text, badge_bg, badge_fg);
+    let mut rt = RichText::new(label_text).size(if label_strong { 12.5 } else { 12.0 });
+    if label_strong {
+        rt = rt.strong().color(pal.text_primary);
+    } else {
+        rt = rt.color(pal.text_muted);
+    }
+    left_ui.add(egui::Label::new(rt).truncate());
+
+    pill_resp.clicked()
 }
 
 fn paint_progress_bar(ui: &mut egui::Ui, frac: f32, height: f32, fill_color: Color32, pal: &Palette) {

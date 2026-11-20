@@ -41,6 +41,26 @@ impl ThemeMode {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TimerDisplayMode {
+    #[default]
+    Elapsed,
+    Eta,
+}
+
+impl TimerDisplayMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            TimerDisplayMode::Elapsed => "Time Elapsed",
+            TimerDisplayMode::Eta => "Estimated Time Left (ETA)",
+        }
+    }
+
+    pub fn all() -> &'static [TimerDisplayMode] {
+        &[TimerDisplayMode::Elapsed, TimerDisplayMode::Eta]
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SyncMode {
     #[default]
     Auto,
@@ -274,6 +294,8 @@ impl OutputFormat {
 pub struct AppConfig {
     // UI & Window Geometry
     pub theme: ThemeMode,
+    pub default_timer_mode: TimerDisplayMode,
+    pub auto_start_on_folder_drop: bool,
     pub window_width: f32,
     pub window_height: f32,
     pub window_x: Option<f32>,
@@ -328,6 +350,8 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             theme: ThemeMode::System,
+            default_timer_mode: TimerDisplayMode::Elapsed,
+            auto_start_on_folder_drop: false,
             window_width: DEFAULT_WINDOW_WIDTH,
             window_height: DEFAULT_WINDOW_HEIGHT,
             window_x: None,

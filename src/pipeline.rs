@@ -1497,6 +1497,7 @@ pub fn process_explicit_inputs(
                 raw_pts,
                 eff_ad_dur,
                 target_duration,
+                ref_samples,
                 &ad_samples,
                 8000,
                 config.discontinuity_threshold,
@@ -1506,7 +1507,7 @@ pub fn process_explicit_inputs(
             winner_offset = -plan.global_offset;
             winner_peak = plan.confidence;
             emit_log(format!(
-                "  [WARP] Fitted {} continuous PCHIP segment(s) across {} warp points | Median Offset: {:+.3}s | Cuts: {} | Gaps: {} | Mean Confidence: {:.1}%",
+                "  [WARP] Fitted {} continuous PCHIP segment(s) across {} warp points | Median Offset: {:+.3}s | Cuts: {} | Gaps: {} | Match Confidence: {:.1}%",
                 plan.splines.len(),
                 plan.points.len(),
                 winner_offset,
@@ -1515,6 +1516,20 @@ pub fn process_explicit_inputs(
                 plan.confidence * 100.0
             ));
             warp_plan = Some(plan);
+        } else {
+            // Calibrate single-offset correlation confidence from anchor consensus ratio + peak quality
+            // so tracks locked across 80-100 checkpoints reflect their true lock certainty rather than
+            // raw narration-diluted Pearson r.
+            let total_a = measurements.len().max(1) as f64;
+            let consensus = (winner_count as f64 / total_a).clamp(0.0, 1.0);
+            let peak_q = ((winner_peak - 0.10) / (0.45 - 0.10))
+                .clamp(0.0, 1.0)
+                .powf(0.75);
+            winner_peak = if winner_count >= 3 {
+                (0.60 * consensus + 0.40 * peak_q).clamp(0.0, 0.99)
+            } else {
+                (winner_peak * 0.85).clamp(0.0, 0.35)
+            };
         }
         tracker.finish_task();
 

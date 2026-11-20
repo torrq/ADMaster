@@ -720,11 +720,7 @@ pub fn decode_warp_path(
         .map(|i| {
             let w = &prepared[i];
             let cand = &w.candidates[path_indices[i]];
-            let conf = if spur[i] {
-                0.05
-            } else {
-                cand.score * (0.5 + 0.5 * w.speech_score)
-            };
+            let conf = if spur[i] { 0.05 } else { cand.score };
             WarpPoint {
                 source_time: w.source_center,
                 target_time: w.source_center + path_offsets[i],
@@ -859,11 +855,14 @@ fn prepare_lattice(
 }
 
 /// Fits monotone PCHIP splines across contiguous segments, vets out non-monotone excursions,
-/// and nudges structural cut boundaries into narrator silence gaps (`_nudge_to_silence`).
+/// pinpoints acoustic cut boundaries against reference audio, and nudges cut points into
+/// sustained narrator silence breaks without shifting into pre/post-cut dialogue.
+#[allow(clippy::too_many_arguments)]
 pub fn fit_and_refine_warp(
     path: Vec<WarpPoint>,
     ad_duration: f64,
     video_duration: f64,
+    y_vid_8k: &[f32],
     y_ad_8k: &[f32],
     sr_8k: u32,
     discontinuity_threshold: f64,
@@ -938,8 +937,9 @@ pub fn fit_and_refine_warp(
         }
     }
 
-    // Refine structural cut boundaries by nudging into AD narration silence gaps (our custom ADSync improvement!)
-    refine_boundaries_to_silence(&mut splines, &mut segment_ranges, y_ad_8k, sr_8k);
+    // Refine structural cut boundaries: pinpoint the true acoustic transition against y_vid_8k
+    // first, then nudge into a sustained narrator silence pause inside the acoustically-safe zone.
+    refine_boundaries_to_silence(&mut splines, &mut segment_ranges, y_vid_8k, y_ad_8k, sr_8k);
 
     let cuts = extract_cuts_from_points(&vetted_path, 0.20);
     // Compute genuine excised-scene gaps from the ACTUAL rendered spline endpoints (not window centers!)
@@ -971,12 +971,12 @@ pub fn fit_and_refine_warp(
         }
     }
 
-    let mean_conf = if vetted_path.is_empty() {
-        0.0
-    } else {
-        (vetted_path.iter().map(|p| p.confidence).sum::<f64>() / (vetted_path.len() as f64))
-            .clamp(0.0, 1.0)
-    };
+    let calibrated_conf = compute_calibrated_warp_confidence(
+        &vetted_path,
+        &cuts,
+        &explicit_gaps,
+        video_duration,
+    );
 
     let mut offsets: Vec<f64> = vetted_path
         .iter()
@@ -996,9 +996,75 @@ pub fn fit_and_refine_warp(
         anchor_points: all_anchors,
         cuts,
         explicit_gaps,
-        confidence: mean_conf,
+        confidence: calibrated_conf,
         global_offset,
     }
+}
+
+/// Computes a calibrated 0.0..=0.99 match confidence score for Time-Warp alignment by combining:
+/// 1. Coverage: fraction of active windows with genuine acoustic locks (> 0.18 raw score).
+/// 2. Signal quality: calibrated from median + 75th-percentile raw correlation of locked windows
+///    (accounting for narrator voiceover energy capping raw Pearson r around ~0.35-0.55).
+/// 3. Path stability: fraction of consecutive windows without erratic jumps, penalized for
+///    excessive cut fragmentation or large excised-scene gaps.
+fn compute_calibrated_warp_confidence(
+    vetted_path: &[WarpPoint],
+    cuts: &[WarpCut],
+    explicit_gaps: &[(f64, f64, f64)],
+    video_duration: f64,
+) -> f64 {
+    if vetted_path.is_empty() {
+        return 0.0;
+    }
+    let n = vetted_path.len();
+    let mut locked_scores: Vec<f64> = vetted_path
+        .iter()
+        .filter(|p| p.confidence > 0.18)
+        .map(|p| p.confidence)
+        .collect();
+    let coverage = (locked_scores.len() as f64) / (n as f64);
+    if locked_scores.is_empty() {
+        let raw_mean = vetted_path.iter().map(|p| p.confidence).sum::<f64>() / (n as f64);
+        return raw_mean.clamp(0.0, 0.25);
+    }
+
+    locked_scores.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let p50 = locked_scores[locked_scores.len() / 2];
+    let p75 = locked_scores[(locked_scores.len() * 3) / 4];
+    let rep_r = 0.60 * p50 + 0.40 * p75;
+    let signal_quality = ((rep_r - 0.14) / (0.48 - 0.14)).clamp(0.0, 1.0).powf(0.75);
+
+    let stable_steps = vetted_path
+        .windows(2)
+        .filter(|w| {
+            let o0 = w[0].target_time - w[0].source_time;
+            let o1 = w[1].target_time - w[1].source_time;
+            (o1 - o0).abs() <= 0.15
+        })
+        .count();
+    let stability = if n > 1 {
+        (stable_steps as f64) / ((n - 1) as f64)
+    } else {
+        1.0
+    };
+
+    let total_gap: f64 = explicit_gaps.iter().map(|g| g.2).sum();
+    let gap_frac = (total_gap / video_duration.max(1.0)).clamp(0.0, 1.0);
+    let gap_penalty = (gap_frac * 0.60).clamp(0.0, 0.35);
+
+    let n_cuts = cuts.len().saturating_sub(1);
+    let cut_penalty = ((n_cuts.saturating_sub(12) as f64) * 0.015).clamp(0.0, 0.25);
+
+    let raw_cal = (0.40 * coverage + 0.40 * signal_quality + 0.20 * stability)
+        * (1.0 - gap_penalty)
+        * (1.0 - cut_penalty);
+
+    let final_conf = if coverage < 0.25 {
+        raw_cal.min(coverage * 1.6)
+    } else {
+        raw_cal
+    };
+    final_conf.clamp(0.0, 0.99)
 }
 
 fn split_at_discontinuities(path: &[WarpPoint], threshold: f64) -> Vec<Vec<WarpPoint>> {
@@ -1006,8 +1072,18 @@ fn split_at_discontinuities(path: &[WarpPoint], threshold: f64) -> Vec<Vec<WarpP
         return vec![path.to_vec()];
     }
     let synth_conf = 0.12_f64;
+    let bridge_conf = 0.06_f64;
     let mut segments: Vec<Vec<WarpPoint>> = vec![vec![path[0]]];
     for i in 1..path.len() {
+        // Never shatter a contiguous vet_and_bridge synthetic ramp (conf == 0.05) into 1-point
+        // micro-segments, while still splitting real cuts that occur across lattice edges (conf == 0.10).
+        if path[i - 1].confidence <= bridge_conf
+            && path[i].confidence <= bridge_conf
+            && path[i].target_time >= path[i - 1].target_time
+        {
+            segments.last_mut().unwrap().push(path[i]);
+            continue;
+        }
         let prev_off = path[i - 1].target_time - path[i - 1].source_time;
         let cur_off = path[i].target_time - path[i].source_time;
         let jump = (cur_off - prev_off).abs();
@@ -1089,60 +1165,127 @@ fn vet_and_bridge(segments: Vec<Vec<WarpPoint>>) -> Vec<WarpPoint> {
         }
     }
 
-    let m = eligible.len();
-    let vid_lo: Vec<f64> = eligible
-        .iter()
-        .map(|&i| {
-            reals[i]
-                .first()
-                .unwrap_or(&segments[i][0])
-                .target_time
-        })
-        .collect();
-    let vid_hi: Vec<f64> = eligible
-        .iter()
-        .map(|&i| {
-            reals[i]
-                .last()
-                .unwrap_or(segments[i].last().unwrap())
-                .target_time
-        })
-        .collect();
+    let solve_monotone_dp = |cand_eligible: &[usize]| -> Vec<usize> {
+        let m = cand_eligible.len();
+        if m == 0 {
+            return Vec::new();
+        }
+        let vid_lo: Vec<f64> = cand_eligible
+            .iter()
+            .map(|&i| {
+                reals[i]
+                    .first()
+                    .unwrap_or(&segments[i][0])
+                    .target_time
+            })
+            .collect();
+        let vid_hi: Vec<f64> = cand_eligible
+            .iter()
+            .map(|&i| {
+                reals[i]
+                    .last()
+                    .unwrap_or(segments[i].last().unwrap())
+                    .target_time
+            })
+            .collect();
 
-    let mut best = vec![0.0_f64; m];
-    let mut prev = vec![None; m];
-    for a in 0..m {
-        best[a] = masses[eligible[a]];
-        for b in 0..a {
-            if vid_lo[a] >= vid_hi[b] - 1.0 && best[b] + masses[eligible[a]] > best[a] {
-                best[a] = best[b] + masses[eligible[a]];
-                prev[a] = Some(b);
+        let mut best = vec![0.0_f64; m];
+        let mut prev = vec![None; m];
+        for a in 0..m {
+            best[a] = masses[cand_eligible[a]];
+            for b in 0..a {
+                if vid_lo[a] >= vid_hi[b] - 1.0 && best[b] + masses[cand_eligible[a]] > best[a] {
+                    best[a] = best[b] + masses[cand_eligible[a]];
+                    prev[a] = Some(b);
+                }
             }
         }
-    }
 
-    let mut keep = std::collections::HashSet::new();
-    if let Some((mut cur, _)) = best
-        .iter()
-        .enumerate()
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-    {
-        loop {
-            keep.insert(eligible[cur]);
-            if let Some(p) = prev[cur] {
-                cur = p;
+        let mut out = Vec::new();
+        if let Some((mut cur, _)) = best
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+        {
+            loop {
+                out.push(cand_eligible[cur]);
+                if let Some(p) = prev[cur] {
+                    cur = p;
+                } else {
+                    break;
+                }
+            }
+        }
+        out.sort_unstable();
+        out
+    };
+
+    let seg_median_offset = |seg_idx: usize| -> f64 {
+        let src = if !reals[seg_idx].is_empty() {
+            &reals[seg_idx]
+        } else {
+            &segments[seg_idx]
+        };
+        let mut offs: Vec<f64> = src.iter().map(|p| p.target_time - p.source_time).collect();
+        offs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        offs[offs.len() / 2]
+    };
+
+    // Iteratively solve monotone chain DP and prune brief isolated false-match excursions
+    // (e.g. a 10-35s repeated music/ambience match jumping > 4s away from flanking segments
+    // that agree within <= 2.5s), then re-solve so any valid segment previously blocked by
+    // the excursion is restored cleanly!
+    let mut kept_sorted = solve_monotone_dp(&eligible);
+    loop {
+        let mut pruned_ids: Vec<usize> = Vec::new();
+        for pos in 1..kept_sorted.len().saturating_sub(1) {
+            let prev_idx = kept_sorted[pos - 1];
+            let cur_idx = kept_sorted[pos];
+            let next_idx = kept_sorted[pos + 1];
+
+            let cur_reals = &reals[cur_idx];
+            let cur_dur = if cur_reals.len() >= 2 {
+                cur_reals.last().unwrap().source_time - cur_reals[0].source_time
             } else {
-                break;
+                0.0
+            };
+            let prev_off = seg_median_offset(prev_idx);
+            let cur_off = seg_median_offset(cur_idx);
+            let next_off = seg_median_offset(next_idx);
+
+            let flanks_agree = (next_off - prev_off).abs() <= 2.5;
+            let jumps_away =
+                (cur_off - prev_off).abs() > 4.0 && (cur_off - next_off).abs() > 4.0;
+            let short_island = cur_dur < 45.0 || cur_reals.len() < 22;
+
+            let ad_gap_after = reals[next_idx]
+                .first()
+                .zip(cur_reals.last())
+                .map(|(n0, cl)| n0.source_time - cl.source_time)
+                .unwrap_or(0.0);
+            let vid_gap_after = reals[next_idx]
+                .first()
+                .zip(cur_reals.last())
+                .map(|(n0, cl)| n0.target_time - cl.target_time)
+                .unwrap_or(0.0);
+            let forces_compression = ad_gap_after > 6.0 && vid_gap_after < 0.65 * ad_gap_after;
+            let tiny_mass = masses[cur_idx] < 0.25 * (masses[prev_idx] + masses[next_idx]);
+
+            if flanks_agree && jumps_away && short_island && (forces_compression || tiny_mass) {
+                pruned_ids.push(cur_idx);
             }
         }
+        if pruned_ids.is_empty() {
+            break;
+        }
+        eligible.retain(|id| !pruned_ids.contains(id));
+        kept_sorted = solve_monotone_dp(&eligible);
     }
 
+    let keep: std::collections::HashSet<usize> = kept_sorted.iter().copied().collect();
     if keep.len() == segments.len() {
         return segments.into_iter().flatten().collect();
     }
-
-    let mut kept_sorted: Vec<usize> = keep.iter().copied().collect();
-    kept_sorted.sort_unstable();
 
     let mut new_points = Vec::new();
     for (idx, seg) in segments.iter().enumerate() {
@@ -1330,10 +1473,136 @@ fn add_virtual_boundaries(
     anchors
 }
 
-/// Nudges segment cut boundaries into sustained silence gaps in AD narration (`_nudge_to_silence` from ADSync `refine.py`).
+/// Pinpoints the acoustically-safe cut zone `[safe_lo, safe_hi]` and optimal acoustic cut
+/// `exact_cut` around `boundary` by comparing local `|corr(ad, vid_pre)|` vs `|corr(ad, vid_post)|`
+/// in 100ms steps. Prevents silence nudging from sliding into pre-cut dialogue (which doubles audio!)
+/// while allowing full flexibility across quiet/narrator-only stretches.
+#[allow(clippy::too_many_arguments)]
+fn pinpoint_acoustic_cut_zone(
+    y_vid: &[f32],
+    y_ad: &[f32],
+    sr: u32,
+    boundary: f64,
+    off_pre: f64,
+    off_post: f64,
+    left_start: f64,
+    right_end: f64,
+) -> (f64, f64, f64) {
+    let default_lo = (boundary - 3.5).max(left_start + 0.5);
+    let default_hi = (boundary + 3.5).min(right_end - 0.5);
+    if y_vid.is_empty() || y_ad.is_empty() || sr == 0 {
+        return (boundary, default_lo, default_hi);
+    }
+
+    let sr_f = sr as f64;
+    let step_sec = 0.15_f64;
+    let win_samples = ((0.50 * sr_f) as usize).max(64);
+    // Scan up to +/- 45s around the coarse Viterbi boundary so cuts inside long quiet scenes
+    // (where Viterbi's jump penalty can delay a transition by 15-35s) still snap to the true cut!
+    let scan_lo = (boundary - 45.0).max(left_start + 0.5);
+    let scan_hi = (boundary + 45.0).min(right_end - 0.5);
+    if scan_hi <= scan_lo + 1.0 {
+        return (boundary, default_lo, default_hi);
+    }
+
+    let n_steps = ((scan_hi - scan_lo) / step_sec).floor() as usize + 1;
+    let mut times = Vec::with_capacity(n_steps);
+    let mut diffs = Vec::with_capacity(n_steps);
+
+    let abs_norm_corr = |a_idx: usize, v_idx: isize| -> f64 {
+        if v_idx < 0 {
+            return 0.0;
+        }
+        let vi = v_idx as usize;
+        if a_idx + win_samples > y_ad.len() || vi + win_samples > y_vid.len() {
+            return 0.0;
+        }
+        let a_seg = &y_ad[a_idx..a_idx + win_samples];
+        let v_seg = &y_vid[vi..vi + win_samples];
+        let a_mean = a_seg.iter().map(|&x| x as f64).sum::<f64>() / (win_samples as f64);
+        let v_mean = v_seg.iter().map(|&x| x as f64).sum::<f64>() / (win_samples as f64);
+        let mut dot = 0.0_f64;
+        let mut a_sq = 0.0_f64;
+        let mut v_sq = 0.0_f64;
+        for (&a, &v) in a_seg.iter().zip(v_seg.iter()) {
+            let da = (a as f64) - a_mean;
+            let dv = (v as f64) - v_mean;
+            dot += da * dv;
+            a_sq += da * da;
+            v_sq += dv * dv;
+        }
+        let denom = (a_sq * v_sq).sqrt();
+        if denom > 1e-6 {
+            (dot / denom).abs()
+        } else {
+            0.0
+        }
+    };
+
+    for k in 0..n_steps {
+        let t_ad = scan_lo + (k as f64) * step_sec;
+        let a_idx = (t_ad * sr_f) as usize;
+        let vp_idx = ((t_ad + off_pre) * sr_f).round() as isize;
+        let vq_idx = ((t_ad + off_post) * sr_f).round() as isize;
+        let rp = abs_norm_corr(a_idx, vp_idx);
+        let rq = abs_norm_corr(a_idx, vq_idx);
+        // Zero out weak/silent windows so narrator-only quiet passages remain neutral
+        let d = if rp.max(rq) >= 0.14 { rp - rq } else { 0.0 };
+        times.push(t_ad);
+        diffs.push(d);
+    }
+
+    let total_sum: f64 = diffs.iter().sum();
+    let mut prefix = 0.0_f64;
+    let mut scores = Vec::with_capacity(n_steps + 1);
+    for &d in &diffs {
+        scores.push(2.0 * prefix - total_sum);
+        prefix += d;
+    }
+    scores.push(2.0 * prefix - total_sum);
+
+    let max_score = scores
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let min_score = scores
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min);
+    // If there is almost no acoustic contrast around this cut (quiet scene), keep a clean local zone
+    if max_score - min_score < 0.25 {
+        return (boundary, default_lo, default_hi);
+    }
+
+    // Collect the plateau of cut indices within 0.20 of max_score (the exact acoustically-safe zone)
+    let tol = 0.20_f64;
+    let mut plat_lo_idx = n_steps;
+    let mut plat_hi_idx = 0usize;
+    for (idx, &sc) in scores.iter().enumerate() {
+        if sc >= max_score - tol {
+            plat_lo_idx = plat_lo_idx.min(idx);
+            plat_hi_idx = plat_hi_idx.max(idx);
+        }
+    }
+    let idx_to_t = |idx: usize| -> f64 {
+        if idx >= times.len() {
+            *times.last().unwrap_or(&boundary)
+        } else {
+            times[idx]
+        }
+    };
+    let safe_lo = (idx_to_t(plat_lo_idx) - 0.35).max(scan_lo);
+    let safe_hi = (idx_to_t(plat_hi_idx) + 0.35).min(scan_hi);
+    let exact_cut = 0.5 * (idx_to_t(plat_lo_idx) + idx_to_t(plat_hi_idx));
+    (exact_cut, safe_lo, safe_hi)
+}
+
+/// Refines structural cut boundaries by first pinpointing the true acoustic cut against `y_vid`,
+/// then nudging within the acoustically-safe zone into a sustained narrator silence pause.
 fn refine_boundaries_to_silence(
     splines: &mut [PchipSpline],
     segment_ranges: &mut [(f64, f64)],
+    y_vid: &[f32],
     y_ad: &[f32],
     sr: u32,
 ) {
@@ -1346,97 +1615,95 @@ fn refine_boundaries_to_silence(
         if (right_start - boundary).abs() > 1e-4 {
             continue;
         }
-        let jump = splines[idx + 1].eval(boundary) - splines[idx].eval(boundary);
+        let vid_left = splines[idx].eval(boundary);
+        let vid_right = splines[idx + 1].eval(boundary);
+        let jump = vid_right - vid_left;
         if jump.abs() < 0.25 {
             continue;
         }
-        let silence_b = nudge_to_silence(
+        let off_pre = vid_left - boundary;
+        let off_post = vid_right - boundary;
+
+        let (exact_cut, safe_lo, safe_hi) = pinpoint_acoustic_cut_zone(
+            y_vid,
             y_ad,
             sr,
             boundary,
+            off_pre,
+            off_post,
             left_start,
             right_end,
-            20.0,
-            0.008,
-            0.15,
-            jump,
         );
-        if silence_b > left_start && silence_b < right_end && (silence_b - boundary).abs() > 0.05 {
-            // Extend PCHIP knot endpoints smoothly
-            let mut ok = true;
+
+        let silence_b = nudge_to_silence_in_zone(
+            y_ad,
+            sr,
+            exact_cut,
+            safe_lo.max(left_start + 0.25),
+            safe_hi.min(right_end - 0.25),
+            0.008,
+        );
+        if silence_b > left_start + 0.1
+            && silence_b < right_end - 0.1
+            && (silence_b - boundary).abs() > 0.05
+        {
             let mut new_left = splines[idx].clone();
             let mut new_right = splines[idx + 1].clone();
 
-            if silence_b > *new_left.x.last().unwrap() {
+            if silence_b > *new_left.x.last().unwrap() + 1e-4 {
                 let edge = *new_left.x.last().unwrap();
-                let slope = new_left.derivative(edge);
-                if (0.5..=2.0).contains(&slope) {
-                    let target = new_left.eval(edge) + (silence_b - edge) * slope;
-                    let mut xs = new_left.x.clone();
-                    let mut ys = new_left.y.clone();
-                    xs.push(silence_b);
-                    ys.push(target);
-                    new_left = PchipSpline::new(xs, ys);
-                } else {
-                    ok = false;
-                }
+                let slope = new_left.derivative(edge).clamp(0.95, 1.05);
+                let target = new_left.eval(edge) + (silence_b - edge) * slope;
+                let mut xs = new_left.x.clone();
+                let mut ys = new_left.y.clone();
+                xs.push(silence_b);
+                ys.push(target);
+                new_left = PchipSpline::new(xs, ys);
             }
-            if ok && silence_b < new_right.x[0] {
+            if silence_b < new_right.x[0] - 1e-4 {
                 let edge = new_right.x[0];
-                let slope = new_right.derivative(edge);
-                if (0.5..=2.0).contains(&slope) {
-                    let target = new_right.eval(edge) + (silence_b - edge) * slope;
-                    let mut xs = vec![silence_b];
-                    let mut ys = vec![target];
-                    xs.extend_from_slice(&new_right.x);
-                    ys.extend_from_slice(&new_right.y);
-                    new_right = PchipSpline::new(xs, ys);
-                } else {
-                    ok = false;
-                }
+                let slope = new_right.derivative(edge).clamp(0.95, 1.05);
+                let target = new_right.eval(edge) + (silence_b - edge) * slope;
+                let mut xs = vec![silence_b];
+                let mut ys = vec![target];
+                xs.extend_from_slice(&new_right.x);
+                ys.extend_from_slice(&new_right.y);
+                new_right = PchipSpline::new(xs, ys);
             }
 
-            if ok {
-                splines[idx] = new_left;
-                splines[idx + 1] = new_right;
-                segment_ranges[idx].1 = silence_b;
-                segment_ranges[idx + 1].0 = silence_b;
-            }
+            splines[idx] = new_left;
+            splines[idx + 1] = new_right;
+            segment_ranges[idx].1 = silence_b;
+            segment_ranges[idx + 1].0 = silence_b;
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn nudge_to_silence(
+/// Finds the cleanest sustained narrator silence pause inside `[zone_lo, zone_hi]` closest to
+/// `target_cut`, preferring full sentence pauses (>= 0.40s) over short consonant dips and capping
+/// the silence threshold at 0.018 RMS so active speech (~0.03+) is never mistaken for silence.
+fn nudge_to_silence_in_zone(
     y_ad: &[f32],
     sr: u32,
-    boundary: f64,
-    left_start: f64,
-    right_end: f64,
-    search_radius: f64,
+    target_cut: f64,
+    zone_lo: f64,
+    zone_hi: f64,
     threshold: f64,
-    silence_sec: f64,
-    jump: f64,
 ) -> f64 {
     let ad_len = y_ad.len();
     let sr_f = sr as f64;
-    let origin = (boundary * sr_f) as usize;
-    if origin >= ad_len {
-        return boundary;
+    if ad_len == 0 || zone_hi <= zone_lo + 0.15 {
+        return target_cut;
     }
     let win = ((0.05 * sr_f) as usize).max(1);
-    let need_silent = ((silence_sec / 0.05) as usize).max(2);
-    let rad = (search_radius * sr_f) as usize;
-    let lo = (((left_start * sr_f) as usize) + win).max(origin.saturating_sub(rad));
-    let hi = (((right_end * sr_f) as usize).saturating_sub(win))
-        .min(origin + rad)
-        .min(ad_len.saturating_sub(win));
-    if hi <= lo + need_silent * win {
-        return boundary;
+    let lo = ((zone_lo * sr_f) as usize).min(ad_len.saturating_sub(win));
+    let hi = ((zone_hi * sr_f) as usize).min(ad_len);
+    if hi <= lo + 2 * win {
+        return target_cut;
     }
 
     let n_wins = (hi - lo) / win;
-    let mut rms_arr: Vec<f64> = (0..n_wins)
+    let rms_arr: Vec<f64> = (0..n_wins)
         .map(|w| {
             let chunk = &y_ad[lo + w * win..lo + (w + 1) * win];
             let sum_sq: f64 = chunk.iter().map(|&x| (x as f64) * (x as f64)).sum();
@@ -1446,23 +1713,8 @@ fn nudge_to_silence(
     let mut sorted_rms = rms_arr.clone();
     sorted_rms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let local_floor = sorted_rms[(sorted_rms.len() * 15) / 100];
-    let eff_thresh = threshold.max((local_floor * 1.5).min(0.045));
-
-    // Check if origin is already inside silence
-    let half_check = (need_silent * win) / 2;
-    let c_start = origin.saturating_sub(half_check);
-    let c_end = (origin + half_check).min(ad_len);
-    if c_end > c_start {
-        let c_rms = (y_ad[c_start..c_end]
-            .iter()
-            .map(|&x| (x as f64) * (x as f64))
-            .sum::<f64>()
-            / ((c_end - c_start) as f64))
-            .sqrt();
-        if c_rms < eff_thresh {
-            return boundary;
-        }
-    }
+    // Strict ceiling (0.018) guarantees active narrator speech (~0.03+) is never treated as silence
+    let eff_thresh = threshold.max((local_floor * 1.6).min(0.018));
 
     let find_runs = |min_wins: usize| -> Vec<(usize, usize)> {
         let mut runs = Vec::new();
@@ -1488,44 +1740,23 @@ fn nudge_to_silence(
         runs
     };
 
-    let mut silent_runs = find_runs(need_silent);
-    if silent_runs.is_empty() && need_silent > 2 {
-        silent_runs = find_runs(2);
-    }
-    let _ = &mut rms_arr;
+    // Prefer genuine sentence pauses (>= 0.40s = 8 windows), then >= 0.25s (5), then >= 0.15s (3)
+    let mut silent_runs = find_runs(8);
     if silent_runs.is_empty() {
-        return boundary;
+        silent_runs = find_runs(5);
+    }
+    if silent_runs.is_empty() {
+        silent_runs = find_runs(3);
+    }
+    if silent_runs.is_empty() {
+        return target_cut;
     }
 
-    let best_run = if jump > 0.4 {
-        silent_runs
-            .iter()
-            .copied()
-            .filter(|&(a, b)| (a + b) / 2 <= origin)
-            .last()
-            .unwrap_or_else(|| {
-                *silent_runs
-                    .iter()
-                    .min_by_key(|&&(a, b)| ((a + b) / 2).abs_diff(origin))
-                    .unwrap()
-            })
-    } else if jump < -0.4 {
-        silent_runs
-            .iter()
-            .copied()
-            .find(|&(a, b)| (a + b) / 2 >= origin)
-            .unwrap_or_else(|| {
-                *silent_runs
-                    .iter()
-                    .min_by_key(|&&(a, b)| ((a + b) / 2).abs_diff(origin))
-                    .unwrap()
-            })
-    } else {
-        *silent_runs
-            .iter()
-            .min_by_key(|&&(a, b)| ((a + b) / 2).abs_diff(origin))
-            .unwrap()
-    };
+    let origin = (target_cut * sr_f) as usize;
+    let best_run = *silent_runs
+        .iter()
+        .min_by_key(|&&(a, b)| ((a + b) / 2).abs_diff(origin))
+        .unwrap();
 
     (0.5 * ((best_run.0 + best_run.1) as f64)) / sr_f
 }
@@ -1534,11 +1765,17 @@ pub fn extract_cuts_from_points(pts: &[WarpPoint], jump_threshold: f64) -> Vec<W
     if pts.len() < 2 {
         return Vec::new();
     }
+    let bridge_conf = 0.06_f64;
     let offsets: Vec<f64> = pts.iter().map(|p| p.target_time - p.source_time).collect();
     let mut runs: Vec<(f64, f64, f64)> = Vec::new();
     let mut start = 0usize;
     for i in 1..=pts.len() {
-        if i == pts.len() || (offsets[i] - offsets[i - 1]).abs() > jump_threshold {
+        let is_end = i == pts.len();
+        let is_bridge_ramp = !is_end
+            && pts[i - 1].confidence <= bridge_conf
+            && pts[i].confidence <= bridge_conf
+            && pts[i].target_time >= pts[i - 1].target_time;
+        if is_end || (!is_bridge_ramp && (offsets[i] - offsets[i - 1]).abs() > jump_threshold) {
             let mut seg_offs = offsets[start..i].to_vec();
             seg_offs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let mid_off = seg_offs[seg_offs.len() / 2];
