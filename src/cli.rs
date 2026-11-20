@@ -400,6 +400,10 @@ fn parse_cli_args_with_mode(
                 headless = true;
                 config.log_filename_pattern = need_val!().to_string();
             }
+            "--output-pattern" => {
+                headless = true;
+                config.ad_filename_pattern = need_val!().to_string();
+            }
             "--no-stretch" | "--force-stretch" => {
                 headless = true;
             }
@@ -608,6 +612,7 @@ File & Scratch Management:\n\
   --clean-scratch           Wipe scratch directory before running for a 100% clean run\n\
   --keep-scratch            Keep temporary analysis & intermediate WAVs in scratch/\n\
   --log-dir <DIR>           Custom session log directory (Defaults to the MKV's folder)\n\
+  --output-pattern <PAT>    AD output filename template (tokens: {{title}}, {{mkv}}, {{ad}}, {{ad_tag}}, {{variant}}, {{codec}}, {{bitrate}}, {{method}}, {{speed}}, {{date}})\n\
   --log-pattern <PATTERN>   Log filename template (tokens: {{title}}, {{mkv}}, {{date}}, {{time}}, {{datetime}}, {{tracks}}, {{method}})\n\
   --no-log-to-file          Disable writing session log files to disk\n\
   --no-render               Compute & cache alignment parameters only without rendering audio\n\

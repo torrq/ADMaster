@@ -1901,11 +1901,39 @@ fn maybe_save_log_file(
         .and_then(|s| s.to_str())
         .unwrap_or(base_title);
     let filename = config.format_log_filename(base_title, mkv_stem, track_count, method_tag);
-    let full_path = log_dir.join(filename);
+    let full_path = unique_log_path(&log_dir, &filename);
     if fs::write(&full_path, log_text).is_ok() {
         Some(full_path)
     } else {
         None
+    }
+}
+
+/// Returns `log_dir/filename` if it does not exist yet, otherwise appends `-1`, `-2`, ...
+/// before the file extension so existing session logs are never overwritten.
+pub fn unique_log_path(log_dir: &Path, filename: &str) -> PathBuf {
+    let candidate = log_dir.join(filename);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let path = Path::new(filename);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(filename);
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+    let mut idx = 1usize;
+    loop {
+        let numbered = if ext.is_empty() {
+            format!("{}-{}", stem, idx)
+        } else {
+            format!("{}-{}.{}", stem, idx, ext)
+        };
+        let next = log_dir.join(numbered);
+        if !next.exists() {
+            return next;
+        }
+        idx += 1;
     }
 }
 
@@ -2225,7 +2253,6 @@ where
     };
     let out_fmt = config.effective_output_format();
     let stereo_br = config.effective_stereo_bitrate_kbps();
-    let ext = out_fmt.extension();
     let codec_name = out_fmt.codec_name();
 
     let label_prefix = if total_ad_count == 1 {
@@ -2233,8 +2260,35 @@ where
     } else {
         format!("{}-AD [{}]", base_title, res.name)
     };
-    let out_stereo = out_dir.join(format!("{} (Stereo){}{}", label_prefix, suffix, ext));
-    let out_night = out_dir.join(format!("{} (Night Mode){}{}", label_prefix, suffix, ext));
+    let mkv_stem = ref_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(base_title);
+    let method_tag = if res.method.eq_ignore_ascii_case("warp") {
+        "warp"
+    } else {
+        "corr"
+    };
+    let out_stereo = out_dir.join(config.format_ad_filename(
+        base_title,
+        mkv_stem,
+        &res.name,
+        total_ad_count,
+        "Stereo",
+        method_tag,
+        res.is_pal,
+        &suffix,
+    ));
+    let out_night = out_dir.join(config.format_ad_filename(
+        base_title,
+        mkv_stem,
+        &res.name,
+        total_ad_count,
+        "Night Mode",
+        method_tag,
+        res.is_pal,
+        &suffix,
+    ));
 
     let stereo_exists = out_stereo.exists()
         && fs::metadata(&out_stereo).map(|m| m.len()).unwrap_or(0) > 1000;

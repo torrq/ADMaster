@@ -1,7 +1,7 @@
 use crate::config::{
     AppConfig, OutputFormat, PalMode, SyncMode, ThemeMode, TimerDisplayMode,
-    DEFAULT_LOG_FILENAME_PATTERN, DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH, MIN_WINDOW_HEIGHT,
-    MIN_WINDOW_WIDTH, SURROUND_BITRATE_OPTIONS,
+    DEFAULT_AD_FILENAME_PATTERN, DEFAULT_LOG_FILENAME_PATTERN, DEFAULT_WINDOW_HEIGHT,
+    DEFAULT_WINDOW_WIDTH, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, SURROUND_BITRATE_OPTIONS,
 };
 use crate::icon_svg::SvgIconCache;
 use crate::media::{probe_audio_streams, AudioStreamSummary, ToolPaths};
@@ -2399,23 +2399,25 @@ impl ADMasterApp {
                                                                         )
                                                                     })
                                                                     .unwrap_or("Movie");
-                                                                let out_ext = self
-                                                                    .config
-                                                                    .effective_output_format()
-                                                                    .extension();
-                                                                let save_preview = if total_tracks == 1 {
-                                                                    format!(
-                                                                        "Saves as: {}-AD (Stereo){}",
-                                                                        movie_stem_preview, out_ext
-                                                                    )
-                                                                } else {
-                                                                    format!(
-                                                                        "Saves as: {}-AD [{}] (Stereo){}",
+                                                                let mkv_stem_preview = self
+                                                                    .explicit_ref
+                                                                    .as_ref()
+                                                                    .and_then(|p| p.file_stem())
+                                                                    .and_then(|s| s.to_str())
+                                                                    .unwrap_or(movie_stem_preview);
+                                                                let save_preview = format!(
+                                                                    "Saves as: {}",
+                                                                    self.config.format_ad_filename(
                                                                         movie_stem_preview,
+                                                                        mkv_stem_preview,
                                                                         lbl.trim(),
-                                                                        out_ext
+                                                                        total_tracks,
+                                                                        "Stereo",
+                                                                        "corr",
+                                                                        false,
+                                                                        "",
                                                                     )
-                                                                };
+                                                                );
                                                                 horizontal_row_lr(
                                                                     ui,
                                                                     36.0,
@@ -3765,13 +3767,20 @@ impl ADMasterApp {
                                     .strong()
                                     .color(pal.text_muted),
                             );
+                            let preview_stereo = self.config.format_ad_filename(
+                                "Example Movie",
+                                "Example.Movie.2025.1080p",
+                                "Narrator",
+                                1,
+                                "Stereo",
+                                "corr",
+                                false,
+                                "",
+                            );
                             ui.label(
-                                RichText::new(format!(
-                                    "Example Movie-AD (Stereo){}",
-                                    final_fmt.extension()
-                                ))
-                                .font(FontId::monospace(11.5))
-                                .color(pal.accent),
+                                RichText::new(preview_stereo)
+                                    .font(FontId::monospace(11.5))
+                                    .color(pal.accent),
                             );
                             ui.label(
                                 RichText::new(format!("  |  {}", final_fmt.summary_tag(final_br)))
@@ -3782,6 +3791,181 @@ impl ADMasterApp {
                     });
 
                 let _ = cur_br;
+            },
+        );
+
+        ui.add_space(12.0);
+
+        settings_card(
+            ui,
+            pal,
+            "AD Output Filename Syntax",
+            "Customize how rendered Audio Description deliverables are named in the output/ folder.",
+            |ui| {
+                ui.label(
+                    RichText::new(
+                        "Build a template with dynamic tokens below. The selected container extension is added automatically, and Stereo / Night Mode / multi-track uniqueness is preserved.",
+                    )
+                    .size(11.5)
+                    .color(pal.text_muted),
+                );
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let edit_w = (ui.available_width() - 78.0).max(160.0);
+                    changed |= ui
+                        .add(
+                            egui::TextEdit::singleline(&mut self.config.ad_filename_pattern)
+                                .hint_text(DEFAULT_AD_FILENAME_PATTERN)
+                                .font(FontId::monospace(12.5))
+                                .desired_width(edit_w),
+                        )
+                        .changed();
+                    if ui
+                        .button("Reset")
+                        .on_hover_text(format!(
+                            "Restore default pattern: {}",
+                            DEFAULT_AD_FILENAME_PATTERN
+                        ))
+                        .clicked()
+                    {
+                        self.config.ad_filename_pattern =
+                            DEFAULT_AD_FILENAME_PATTERN.to_string();
+                        changed = true;
+                    }
+                });
+
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new("Presets:")
+                            .size(11.5)
+                            .strong()
+                            .color(pal.text_muted),
+                    );
+                    let presets: &[(&str, &str)] = &[
+                        ("Standard", "{title}-AD{ad_tag} ({variant})"),
+                        ("Title + AD Name", "{title} - {ad} ({variant})"),
+                        (
+                            "Codec & Bitrate",
+                            "{title}-AD{ad_tag} ({variant}) [{codec} {bitrate}]",
+                        ),
+                        ("MKV Name", "{mkv}-AD{ad_tag} ({variant})"),
+                        ("AD Name Only", "{ad} ({variant})"),
+                    ];
+                    for &(lbl, pat) in presets {
+                        let is_active = self.config.ad_filename_pattern.trim() == pat;
+                        if ui
+                            .add(
+                                egui::Button::new(RichText::new(lbl).size(11.5))
+                                    .selected(is_active),
+                            )
+                            .on_hover_text(pat)
+                            .clicked()
+                        {
+                            self.config.ad_filename_pattern = pat.to_string();
+                            changed = true;
+                        }
+                    }
+                });
+
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new("Insert token:")
+                            .size(11.5)
+                            .strong()
+                            .color(pal.text_muted),
+                    );
+                    let tokens: &[(&str, &str)] = &[
+                        ("{title}", "Clean movie title, e.g. Example Movie (2025)"),
+                        ("{mkv}", "Original movie filename without extension"),
+                        ("{ad}", "AD track label / source stem, e.g. Narrator"),
+                        ("{ad_tag}", "Adds ' [AD Name]' only when multiple AD tracks exist"),
+                        ("{variant}", "Output mix variant: 'Stereo' or 'Night Mode'"),
+                        ("{codec}", "Output codec tag (AAC, FLAC, WAV, MP3, AC3, EAC3, Opus)"),
+                        ("{bitrate}", "Target bitrate (e.g. 256k) or Lossless"),
+                        ("{channels}", "Channel layout tag (2.0)"),
+                        ("{method}", "Alignment method used (corr or warp)"),
+                        ("{speed}", "Detected AD speed (1.0x or PAL)"),
+                        ("{date}", "Current date (YYYY-MM-DD)"),
+                    ];
+                    for &(tok, tip) in tokens {
+                        if ui
+                            .add(egui::Button::new(
+                                RichText::new(tok).font(FontId::monospace(11.0)),
+                            ))
+                            .on_hover_text(format!("Click to append {} -- {}", tok, tip))
+                            .clicked()
+                        {
+                            let cur = self.config.ad_filename_pattern.trim_end();
+                            if cur.is_empty() {
+                                self.config.ad_filename_pattern = tok.to_string();
+                            } else {
+                                self.config.ad_filename_pattern = format!("{} {}", cur, tok);
+                            }
+                            changed = true;
+                        }
+                    }
+                });
+
+                ui.add_space(6.0);
+                let sample_stereo = self.config.format_ad_filename(
+                    "Example Movie (2025)",
+                    "Example.Movie.2025.1080p",
+                    "Narrator",
+                    1,
+                    "Stereo",
+                    "warp",
+                    false,
+                    "",
+                );
+                let sample_night = self.config.format_ad_filename(
+                    "Example Movie (2025)",
+                    "Example.Movie.2025.1080p",
+                    "Narrator",
+                    1,
+                    "Night Mode",
+                    "warp",
+                    false,
+                    "",
+                );
+                Frame::none()
+                    .fill(pal.well)
+                    .rounding(Rounding::same(6.0))
+                    .stroke(Stroke::new(1.0_f32, pal.border))
+                    .inner_margin(Margin::symmetric(10.0, 6.0))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new("Preview (Stereo):")
+                                    .size(11.5)
+                                    .strong()
+                                    .color(pal.text_muted),
+                            );
+                            ui.label(
+                                RichText::new(sample_stereo)
+                                    .font(FontId::monospace(11.5))
+                                    .color(pal.accent),
+                            );
+                        });
+                        if self.config.generate_night_mode {
+                            ui.add_space(2.0);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(
+                                    RichText::new("Preview (Night Mode):")
+                                        .size(11.5)
+                                        .strong()
+                                        .color(pal.text_muted),
+                                );
+                                ui.label(
+                                    RichText::new(sample_night)
+                                        .font(FontId::monospace(11.5))
+                                        .color(pal.text_primary),
+                                );
+                            });
+                        }
+                    });
             },
         );
 

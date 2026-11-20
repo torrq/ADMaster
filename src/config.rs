@@ -9,6 +9,7 @@ pub const DEFAULT_WINDOW_HEIGHT: f32 = 760.0;
 pub const MIN_WINDOW_WIDTH: f32 = 820.0;
 pub const MIN_WINDOW_HEIGHT: f32 = 580.0;
 pub const DEFAULT_LOG_FILENAME_PATTERN: &str = "{title} - ADMaster Sync ({date}).log";
+pub const DEFAULT_AD_FILENAME_PATTERN: &str = "{title}-AD{ad_tag} ({variant})";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThemeMode {
@@ -342,6 +343,7 @@ pub struct AppConfig {
     pub log_to_file: bool,
     pub log_dir: String,
     pub log_filename_pattern: String,
+    pub ad_filename_pattern: String,
     pub custom_output_dir: String,
     pub custom_mkv_dir: String,
 }
@@ -394,6 +396,7 @@ impl Default for AppConfig {
             log_to_file: true,
             log_dir: String::new(),
             log_filename_pattern: DEFAULT_LOG_FILENAME_PATTERN.to_string(),
+            ad_filename_pattern: DEFAULT_AD_FILENAME_PATTERN.to_string(),
             custom_output_dir: String::new(),
             custom_mkv_dir: String::new(),
         }
@@ -603,6 +606,18 @@ impl AppConfig {
         let _ = leg.log_dir;
     }
 
+    fn sanitize_filename_part(s: &str) -> String {
+        s.chars()
+            .map(|c| match c {
+                '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+                c if c.is_control() => '_',
+                other => other,
+            })
+            .collect::<String>()
+            .trim()
+            .to_string()
+    }
+
     /// Expands syntax tokens in `log_filename_pattern`:
     /// `{title}`, `{mkv}`, `{date}`, `{time}`, `{datetime}`, `{year}`, `{month}`, `{day}`,
     /// `{hour}`, `{minute}`, `{second}`, `{tracks}`, `{method}`.
@@ -620,20 +635,8 @@ impl AppConfig {
             self.log_filename_pattern.trim()
         };
 
-        let sanitize_part = |s: &str| -> String {
-            s.chars()
-                .map(|c| match c {
-                    '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-                    c if c.is_control() => '_',
-                    other => other,
-                })
-                .collect::<String>()
-                .trim()
-                .to_string()
-        };
-
-        let clean_title = sanitize_part(title);
-        let clean_mkv = sanitize_part(mkv_stem);
+        let clean_title = Self::sanitize_filename_part(title);
+        let clean_mkv = Self::sanitize_filename_part(mkv_stem);
         let mut out = raw_pat
             .replace("{title}", &clean_title)
             .replace("{mkv}", &clean_mkv)
@@ -647,9 +650,9 @@ impl AppConfig {
             .replace("{minute}", &now.format("%M").to_string())
             .replace("{second}", &now.format("%S").to_string())
             .replace("{tracks}", &track_count.to_string())
-            .replace("{method}", &sanitize_part(method_tag));
+            .replace("{method}", &Self::sanitize_filename_part(method_tag));
 
-        out = sanitize_part(&out);
+        out = Self::sanitize_filename_part(&out);
         if out.is_empty() {
             out = format!("{}_ADMaster.log", now.format("%Y%m%d_%H%M%S"));
         }
@@ -658,6 +661,91 @@ impl AppConfig {
             out.push_str(".log");
         }
         out
+    }
+
+    /// Expands syntax tokens in `ad_filename_pattern` for rendered AD deliverable files:
+    /// `{title}`, `{mkv}`, `{ad}`, `{ad_tag}`, `{variant}`, `{codec}`, `{bitrate}`,
+    /// `{channels}`, `{method}`, `{speed}`, `{date}`.
+    /// Automatically preserves variant/track uniqueness and appends the configured container extension.
+    #[allow(clippy::too_many_arguments)]
+    pub fn format_ad_filename(
+        &self,
+        title: &str,
+        mkv_stem: &str,
+        ad_name: &str,
+        total_ad_count: usize,
+        variant: &str,
+        method_tag: &str,
+        is_pal: bool,
+        preview_suffix: &str,
+    ) -> String {
+        let now = Local::now();
+        let raw_pat = if self.ad_filename_pattern.trim().is_empty() {
+            DEFAULT_AD_FILENAME_PATTERN
+        } else {
+            self.ad_filename_pattern.trim()
+        };
+
+        let out_fmt = self.effective_output_format();
+        let ext = out_fmt.extension();
+        let codec_tag = match out_fmt {
+            OutputFormat::M4a => "AAC",
+            OutputFormat::Wav => "WAV",
+            OutputFormat::W64 => "W64",
+            OutputFormat::Flac => "FLAC",
+            OutputFormat::Mp3 => "MP3",
+            OutputFormat::Ac3 => "AC3",
+            OutputFormat::Eac3 => "EAC3",
+            OutputFormat::Opus => "Opus",
+        };
+        let bitrate_tag = if out_fmt.is_lossless() {
+            "Lossless".to_string()
+        } else {
+            format!("{}k", self.effective_stereo_bitrate_kbps())
+        };
+
+        let clean_title = Self::sanitize_filename_part(title);
+        let clean_mkv = Self::sanitize_filename_part(mkv_stem);
+        let clean_ad = Self::sanitize_filename_part(ad_name);
+        let clean_variant = Self::sanitize_filename_part(variant);
+        let ad_tag = if total_ad_count > 1 && !clean_ad.is_empty() {
+            format!(" [{}]", clean_ad)
+        } else {
+            String::new()
+        };
+        let speed_tag = if is_pal { "PAL" } else { "1.0x" };
+
+        let has_variant = raw_pat.contains("{variant}");
+        let has_ad = raw_pat.contains("{ad}") || raw_pat.contains("{ad_tag}");
+
+        let mut stem = raw_pat
+            .replace("{title}", &clean_title)
+            .replace("{mkv}", &clean_mkv)
+            .replace("{ad_tag}", &ad_tag)
+            .replace("{ad}", &clean_ad)
+            .replace("{variant}", &clean_variant)
+            .replace("{codec}", codec_tag)
+            .replace("{bitrate}", &bitrate_tag)
+            .replace("{channels}", "2.0")
+            .replace("{method}", &Self::sanitize_filename_part(method_tag))
+            .replace("{speed}", speed_tag)
+            .replace("{date}", &now.format("%Y-%m-%d").to_string());
+
+        stem = Self::sanitize_filename_part(&stem);
+        if stem.to_ascii_lowercase().ends_with(&ext.to_ascii_lowercase()) {
+            let new_len = stem.len().saturating_sub(ext.len());
+            stem = stem[..new_len].trim_end().to_string();
+        }
+        if total_ad_count > 1 && !has_ad && !clean_ad.is_empty() {
+            stem.push_str(&format!(" [{}]", clean_ad));
+        }
+        if self.generate_night_mode && !has_variant && !clean_variant.is_empty() {
+            stem.push_str(&format!(" ({})", clean_variant));
+        }
+        if stem.is_empty() {
+            stem = format!("{}-AD ({})", clean_title, clean_variant);
+        }
+        format!("{}{}{}", stem, preview_suffix, ext)
     }
 
     /// Resolves the output directory for session logs.
@@ -766,6 +854,9 @@ impl AppConfig {
         }
         if self.log_filename_pattern.trim().is_empty() {
             self.log_filename_pattern = DEFAULT_LOG_FILENAME_PATTERN.to_string();
+        }
+        if self.ad_filename_pattern.trim().is_empty() {
+            self.ad_filename_pattern = DEFAULT_AD_FILENAME_PATTERN.to_string();
         }
         self.sanitize_window_geometry();
     }

@@ -746,7 +746,7 @@ pub fn predecode_to_mono_wav<F>(
     threads: usize,
     expected_duration_sec: Option<f64>,
     cancel_flag: &AtomicBool,
-    on_progress: F,
+    mut on_progress: F,
 ) -> Result<PathBuf, String>
 where
     F: FnMut(f64),
@@ -780,80 +780,125 @@ where
     let tmp_wav = scratch_dir.join(format!("{}_tmp{}", safe_name, suffix));
 
     if out_wav.exists() {
-        if let Ok(meta) = fs::metadata(&out_wav) {
-            if meta.len() > 1024 {
-                return Ok(out_wav);
-            }
+        let valid_cached = fs::metadata(&out_wav)
+            .map(|m| m.len() > 1024)
+            .unwrap_or(false)
+            && !wav_appears_all_zeros(&out_wav);
+        if valid_cached {
+            return Ok(out_wav);
         }
         let _ = fs::remove_file(&out_wav);
     }
 
-    let mut af_chain = vec!["asetpts=PTS-STARTPTS".to_string()];
+    let mut base_af = vec!["asetpts=PTS-STARTPTS".to_string()];
     if let Some(s) = active_stretch {
         let target_clock = (input_sr as f64) / s;
-        af_chain.push(format!("asetrate={:.6}", target_clock));
+        base_af.push(format!("asetrate={:.6}", target_clock));
     }
-    af_chain.push(format!("aresample={}", target_sr));
-    af_chain.push("pan=mono|c0=c0".to_string());
+    base_af.push(format!("aresample={}", target_sr));
 
-    let mut cmd = Command::new(ffmpeg_bin);
-    apply_no_window(&mut cmd);
-    cmd.args([
-        "-y",
-        "-nostdin",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-threads",
-        &threads.to_string(),
-        "-fflags",
-        "+genpts",
-        "-i",
-    ])
-    .arg(input_path);
-
-    if let Some(smap) = stream_map {
-        if !smap.is_empty() {
-            cmd.args(["-map", smap]);
+    // Primary decode: mix ALL channels cleanly via `-ac 1` (handles 5.1/7.1, stereo, left-only,
+    // and right-only tracks instead of discarding everything except c0).
+    // If the result is all zeros (e.g. anti-phase stereo where L == -R cancels under L+R),
+    // automatically fall back to c0-only so alignment still gets a clean signal.
+    let passes: [Option<&str>; 2] = [None, Some("pan=mono|c0=c0")];
+    for (pass_idx, extra_pan) in passes.iter().enumerate() {
+        let mut af_chain = base_af.clone();
+        if let Some(pan) = extra_pan {
+            af_chain.push((*pan).to_string());
         }
-    }
 
-    cmd.args([
-        "-vn",
-        "-af",
-        &af_chain.join(","),
-        "-c:a",
-        "pcm_s16le",
-        "-rf64",
-        "auto",
-        "-f",
-        "wav",
-        "-progress",
-        "pipe:1",
-        "-nostats",
-    ])
-    .arg(&tmp_wav);
+        let mut cmd = Command::new(ffmpeg_bin);
+        apply_no_window(&mut cmd);
+        cmd.args([
+            "-y",
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-threads",
+            &threads.to_string(),
+            "-fflags",
+            "+genpts",
+            "-i",
+        ])
+        .arg(input_path);
 
-    let (status, _stdout, stderr) = run_cancellable_command(
-        &mut cmd,
-        cancel_flag,
-        expected_duration_sec,
-        Some(&tmp_wav),
-        on_progress,
-    )?;
-    if !status.success() || !tmp_wav.exists() {
-        let _ = fs::remove_file(&tmp_wav);
-        let err = String::from_utf8_lossy(&stderr);
-        return Err(format!(
-            "Failed to pre-decode '{}' to {}Hz mono WAV: {}",
-            input_path.display(),
-            target_sr,
-            err.trim()
-        ));
+        if let Some(smap) = stream_map {
+            if !smap.is_empty() {
+                cmd.args(["-map", smap]);
+            }
+        }
+
+        cmd.args([
+            "-vn",
+            "-af",
+            &af_chain.join(","),
+            "-ac",
+            "1",
+            "-c:a",
+            "pcm_s16le",
+            "-rf64",
+            "auto",
+            "-f",
+            "wav",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+        ])
+        .arg(&tmp_wav);
+
+        let (status, _stdout, stderr) = run_cancellable_command(
+            &mut cmd,
+            cancel_flag,
+            expected_duration_sec,
+            Some(&tmp_wav),
+            |f| on_progress(f),
+        )?;
+        if !status.success() || !tmp_wav.exists() {
+            let _ = fs::remove_file(&tmp_wav);
+            let err = String::from_utf8_lossy(&stderr);
+            return Err(format!(
+                "Failed to pre-decode '{}' to {}Hz mono WAV: {}",
+                input_path.display(),
+                target_sr,
+                err.trim()
+            ));
+        }
+
+        if pass_idx == 0 && wav_appears_all_zeros(&tmp_wav) {
+            let _ = fs::remove_file(&tmp_wav);
+            continue;
+        }
+        break;
     }
 
     fs::rename(&tmp_wav, &out_wav).map_err(|e| format!("Failed to rename temp WAV: {}", e))?;
     Ok(out_wav)
+}
+
+/// Samples a few slices across a WAV file in <1ms to detect all-zero decodes (e.g. a silent
+/// channel selection or anti-phase L == -R mono cancellation).
+fn wav_appears_all_zeros(path: &Path) -> bool {
+    let Ok(mut reader) = WavStreamReader::open(path) else {
+        return false;
+    };
+    let total = reader.layout.total_frames;
+    if total == 0 {
+        return true;
+    }
+    let sr = reader.layout.sample_rate as u64;
+    let take = (sr * 2).min(total) as usize;
+    let mut buf = Vec::new();
+    for pct in [15u64, 35, 55, 75] {
+        let start = ((total * pct) / 100).min(total.saturating_sub(take as u64));
+        if let Ok(n) = reader.read_frames_stereo_f32(start, take, &mut buf) {
+            if buf[..n * 2].iter().any(|&s| s.abs() > 1e-5) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Extracts or retrieves a clean 48kHz 2.0 stereo 16-bit PCM WAV downmix of the reference master audio.

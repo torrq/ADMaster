@@ -2,7 +2,7 @@
 
 # ADMaster -- Pure-Rust Audio Description Synchronization & Mastering Studio
 
-**ADMaster** (`v2.0.3`) is a high-performance, low-memory pure-Rust desktop studio (`admaster`) and standalone command-line interface (`admaster-cli`) for synchronizing, time-warping, downmixing, loudness-normalizing, and multiplexing Audio Description (AD) and secondary audio tracks for movies and television series.
+**ADMaster** (`v2.0.4`) is a high-performance, low-memory pure-Rust desktop studio (`admaster`) and standalone command-line interface (`admaster-cli`) for synchronizing, time-warping, downmixing, loudness-normalizing, and multiplexing Audio Description (AD) and secondary audio tracks for movies and television series.
 
 It combines **100-anchor 3-band narration-suppressed SIMD FFT cross-correlation** with a native Rust implementation of the **[ADSync](https://github.com/JohnnyTheCoder1/ADSync)** non-linear alignment architecture (STFT acoustic landmark constellation PAL speed probing, second-order Viterbi candidate lattice dynamic programming, monotone Fritsch-Carlson PCHIP cubic spline warping, micro-blip spur filtering, and silence-nudged cut boundary refinement), plus a **streaming 30-second Catmull-Rom cubic warp renderer** and **windowed Master Audio gap splicer** that keep peak memory usage under **55 MB RAM** even on 3.5-hour feature films.
 

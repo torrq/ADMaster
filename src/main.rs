@@ -246,6 +246,72 @@ mod tests {
         cfg.log_filename_pattern = "{title}_sync.txt".to_string();
         let fname2 = cfg.format_log_filename("Example Movie: Cut", "movie", 1, "corr");
         assert_eq!(fname2, "Example Movie_ Cut_sync.txt");
+
+        // Collision increment (-1, -2) before extension
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "admaster_log_unique_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let p0 = admaster::pipeline::unique_log_path(&tmp_dir, "Movie - Sync.log");
+        assert_eq!(p0, tmp_dir.join("Movie - Sync.log"));
+        std::fs::write(&p0, "first").unwrap();
+        let p1 = admaster::pipeline::unique_log_path(&tmp_dir, "Movie - Sync.log");
+        assert_eq!(p1, tmp_dir.join("Movie - Sync-1.log"));
+        std::fs::write(&p1, "second").unwrap();
+        let p2 = admaster::pipeline::unique_log_path(&tmp_dir, "Movie - Sync.log");
+        assert_eq!(p2, tmp_dir.join("Movie - Sync-2.log"));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_ad_filename_formatting() {
+        use admaster::config::OutputFormat;
+
+        let mut cfg = AppConfig::default();
+        assert_eq!(
+            cfg.format_ad_filename(
+                "Example Movie",
+                "Example.Movie.2025",
+                "Narrator",
+                1,
+                "Stereo",
+                "corr",
+                false,
+                ""
+            ),
+            "Example Movie-AD (Stereo).m4a"
+        );
+        assert_eq!(
+            cfg.format_ad_filename(
+                "Example Movie",
+                "Example.Movie.2025",
+                "Narrator",
+                2,
+                "Night Mode",
+                "warp",
+                true,
+                " (Preview 60s)"
+            ),
+            "Example Movie-AD [Narrator] (Night Mode) (Preview 60s).m4a"
+        );
+
+        cfg.set_output_format(OutputFormat::Flac);
+        cfg.ad_filename_pattern = "{title} - {ad} [{codec} {bitrate} {speed}]".to_string();
+        assert_eq!(
+            cfg.format_ad_filename(
+                "Example Movie",
+                "Example.Movie.2025",
+                "Narrator",
+                1,
+                "Stereo",
+                "corr",
+                true,
+                ""
+            ),
+            "Example Movie - Narrator [FLAC Lossless PAL] (Stereo).flac"
+        );
     }
 
     #[test]
