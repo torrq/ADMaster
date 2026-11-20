@@ -1,6 +1,7 @@
 use crate::config::{
-    AppConfig, PalMode, SyncMode, ThemeMode, DEFAULT_LOG_FILENAME_PATTERN, DEFAULT_WINDOW_HEIGHT,
-    DEFAULT_WINDOW_WIDTH, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH,
+    AppConfig, OutputFormat, PalMode, SyncMode, ThemeMode, DEFAULT_LOG_FILENAME_PATTERN,
+    DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH,
+    SURROUND_BITRATE_OPTIONS,
 };
 use crate::icon_svg::SvgIconCache;
 use crate::media::{probe_audio_streams, AudioStreamSummary, ToolPaths};
@@ -1526,12 +1527,24 @@ impl ADMasterApp {
                                 "Create a new .mkv video file with the synced audio tracks built in",
                                 pal,
                             );
-                            changed |= pill_toggle_button(
-                                ui,
-                                "WAV",
-                                &mut self.config.wav_output,
-                                "Save uncompressed .wav files instead of .m4a for quick testing",
-                                pal,
+                            let cur_fmt = self.config.effective_output_format();
+                            let cur_br = self.config.effective_stereo_bitrate_kbps();
+                            let fmt_combo = egui::ComboBox::from_id_salt("ws_output_fmt_combo")
+                                .width(104.0)
+                                .selected_text(cur_fmt.compact_label(cur_br))
+                                .show_ui(ui, |ui| {
+                                    for &fmt in OutputFormat::all() {
+                                        if ui
+                                            .selectable_label(cur_fmt == fmt, fmt.label())
+                                            .clicked()
+                                        {
+                                            self.config.set_output_format(fmt);
+                                            changed = true;
+                                        }
+                                    }
+                                });
+                            fmt_combo.response.on_hover_text(
+                                "Output audio format for synced Stereo and Night Mode tracks (change bitrate in Settings -> Encoding)",
                             );
                             changed |= pill_toggle_button(
                                 ui,
@@ -2168,11 +2181,10 @@ impl ADMasterApp {
                                                                         )
                                                                     })
                                                                     .unwrap_or("Movie");
-                                                                let out_ext = if self.config.wav_output {
-                                                                    ".wav"
-                                                                } else {
-                                                                    ".m4a"
-                                                                };
+                                                                let out_ext = self
+                                                                    .config
+                                                                    .effective_output_format()
+                                                                    .extension();
                                                                 let save_preview = if total_tracks == 1 {
                                                                     format!(
                                                                         "Saves as: {}-AD (Stereo){}",
@@ -3303,14 +3315,202 @@ impl ADMasterApp {
         settings_card(
             ui,
             pal,
+            "Output Format & Bitrate",
+            "Choose the container, audio codec, and bitrate used for synced Stereo and Night Mode deliverables (default: AAC .m4a @ 256 kbps).",
+            |ui| {
+                let cur_fmt = self.config.effective_output_format();
+                let cur_br = self.config.effective_stereo_bitrate_kbps();
+
+                setting_row(
+                    ui,
+                    pal,
+                    "Stereo & Night Mode Format",
+                    "Audio codec and file container for rendered Stereo and Night Mode tracks",
+                    "Default: AAC (.m4a). Lossless options (WAV, Wave64, FLAC) bypass lossy compression.",
+                    |ui| {
+                        egui::ComboBox::from_id_salt("settings_output_format_combo")
+                            .width(270.0)
+                            .selected_text(cur_fmt.label())
+                            .show_ui(ui, |ui| {
+                                for &fmt in OutputFormat::all() {
+                                    if ui
+                                        .selectable_label(cur_fmt == fmt, fmt.label())
+                                        .clicked()
+                                    {
+                                        self.config.set_output_format(fmt);
+                                        changed = true;
+                                    }
+                                }
+                            });
+                    },
+                );
+
+                ui.separator();
+
+                let active_fmt = self.config.effective_output_format();
+                let active_br = self.config.effective_stereo_bitrate_kbps();
+                setting_row(
+                    ui,
+                    pal,
+                    "Stereo Output Bitrate",
+                    if active_fmt.is_lossless() {
+                        "Lossless format selected -- audio is written at full 48 kHz without lossy bitrate capping"
+                    } else {
+                        "Target bitrate in kbps for lossy Stereo and Night Mode encodes"
+                    },
+                    "Higher bitrates preserve more detail at larger file sizes. 256 kbps is recommended for AAC, MP3, AC3, and EAC3; 160 kbps for Opus.",
+                    |ui| {
+                        let opts = active_fmt.bitrate_options();
+                        if opts.is_empty() {
+                            ui.label(
+                                RichText::new("Lossless (48 kHz)")
+                                    .size(12.0)
+                                    .strong()
+                                    .color(pal.text_muted),
+                            );
+                        } else {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = Vec2::new(5.0, 5.0);
+                                for &kbps in opts {
+                                    let sel = active_br == kbps;
+                                    let fill = if sel { pal.accent } else { pal.surface_alt };
+                                    let fg = if sel {
+                                        Color32::WHITE
+                                    } else {
+                                        pal.text_primary
+                                    };
+                                    let txt = format!("{}k", kbps);
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new(txt).size(12.0).strong().color(fg),
+                                            )
+                                            .fill(fill)
+                                            .stroke(Stroke::new(
+                                                1.0_f32,
+                                                if sel { pal.accent } else { pal.border },
+                                            ))
+                                            .rounding(Rounding::same(5.0))
+                                            .min_size(Vec2::new(48.0, 24.0)),
+                                        )
+                                        .on_hover_cursor(CursorIcon::PointingHand)
+                                        .on_hover_text(if kbps == active_fmt.default_bitrate_kbps() {
+                                            format!("{} kbps (Recommended default)", kbps)
+                                        } else {
+                                            format!("{} kbps", kbps)
+                                        })
+                                        .clicked()
+                                    {
+                                        self.config.audio_bitrate_kbps = kbps;
+                                        changed = true;
+                                    }
+                                }
+                            });
+                        }
+                    },
+                );
+
+                ui.separator();
+
+                let active_surr = self.config.effective_surround_bitrate_kbps();
+                setting_row(
+                    ui,
+                    pal,
+                    "5.1 Surround AC3 Bitrate",
+                    "Bitrate used when Convert Main Audio renders a 5.1 Surround .ac3 track",
+                    "640 kbps is the maximum standard AC3 bitrate and is recommended for surround masters.",
+                    |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(5.0, 5.0);
+                            for &kbps in SURROUND_BITRATE_OPTIONS {
+                                let sel = active_surr == kbps;
+                                let fill = if sel { pal.accent } else { pal.surface_alt };
+                                let fg = if sel {
+                                    Color32::WHITE
+                                } else {
+                                    pal.text_primary
+                                };
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new(format!("{}k", kbps))
+                                                .size(12.0)
+                                                .strong()
+                                                .color(fg),
+                                        )
+                                        .fill(fill)
+                                        .stroke(Stroke::new(
+                                            1.0_f32,
+                                            if sel { pal.accent } else { pal.border },
+                                        ))
+                                        .rounding(Rounding::same(5.0))
+                                        .min_size(Vec2::new(52.0, 24.0)),
+                                    )
+                                    .on_hover_cursor(CursorIcon::PointingHand)
+                                    .clicked()
+                                {
+                                    self.config.surround_bitrate_kbps = kbps;
+                                    changed = true;
+                                }
+                            }
+                        });
+                    },
+                );
+
+                ui.add_space(6.0);
+                let final_fmt = self.config.effective_output_format();
+                let final_br = self.config.effective_stereo_bitrate_kbps();
+                Frame::none()
+                    .fill(pal.well)
+                    .rounding(Rounding::same(6.0))
+                    .stroke(Stroke::new(1.0_f32, pal.border))
+                    .inner_margin(Margin::symmetric(10.0, 6.0))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new("Output preview:")
+                                    .size(11.5)
+                                    .strong()
+                                    .color(pal.text_muted),
+                            );
+                            ui.label(
+                                RichText::new(format!(
+                                    "Example Movie-AD (Stereo){}",
+                                    final_fmt.extension()
+                                ))
+                                .font(FontId::monospace(11.5))
+                                .color(pal.accent),
+                            );
+                            ui.label(
+                                RichText::new(format!("  |  {}", final_fmt.summary_tag(final_br)))
+                                    .size(11.5)
+                                    .color(pal.text_muted),
+                            );
+                        });
+                    });
+
+                let _ = cur_br;
+            },
+        );
+
+        ui.add_space(12.0);
+
+        settings_card(
+            ui,
+            pal,
             "Audio Deliverables & Downmixing",
             "Choose which output variants are rendered into the movie's output/ directory.",
             |ui| {
+                let surr_desc = format!(
+                    "Generates 5.1 Surround AC3 ({}k), True 2.0 Stereo (alimiter), and Night Mode (loudnorm)",
+                    self.config.effective_surround_bitrate_kbps()
+                );
                 changed |= checkbox_row_tip(
                     ui,
                     &mut self.config.convert_main,
                     "Convert & Downmix Main Reference Audio",
-                    "Generates 5.1 Surround AC3 (640k), True 2.0 Stereo (alimiter), and Night Mode (loudnorm)",
+                    &surr_desc,
                     "Applies strict ITU-R BS.775 downmix matrix (L + 0.7071*C + 0.7071*Ls) and -ac 2.",
                     pal,
                 );
@@ -3334,17 +3534,6 @@ impl ADMasterApp {
                     "Generate EBU R128 Night Mode Deliverables",
                     "Renders a loudness-normalized (-16 LUFS) variant alongside the full-dynamic-range Stereo track",
                     "Disable (--no-night) for faster test runs when you only need the standard Stereo track.",
-                    pal,
-                );
-
-                ui.separator();
-
-                changed |= checkbox_row_tip(
-                    ui,
-                    &mut self.config.wav_output,
-                    "Output Uncompressed 16-bit 48kHz PCM WAV (.wav)",
-                    "Bypasses AAC compression and writes 48kHz stereo WAV deliverables directly",
-                    "Ideal for rapid sync verification or external mastering.",
                     pal,
                 );
 

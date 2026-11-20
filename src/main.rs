@@ -249,6 +249,38 @@ mod tests {
     }
 
     #[test]
+    fn test_output_format_and_bitrate_clamping() {
+        use admaster::config::OutputFormat;
+
+        let mut cfg = AppConfig::default();
+        assert_eq!(cfg.effective_output_format(), OutputFormat::M4a);
+        assert_eq!(cfg.effective_stereo_bitrate_kbps(), 256);
+        assert_eq!(cfg.effective_surround_bitrate_kbps(), 640);
+
+        // Legacy wav_output=true upgrades cleanly on sanitize
+        cfg.wav_output = true;
+        cfg.sanitize();
+        assert_eq!(cfg.effective_output_format(), OutputFormat::Wav);
+        assert!(cfg.effective_output_format().is_lossless());
+        assert_eq!(cfg.effective_stereo_bitrate_kbps(), 0);
+
+        // Switching to AC3 snaps invalid bitrate to nearest valid AC3 bitrate
+        cfg.audio_bitrate_kbps = 160;
+        cfg.set_output_format(OutputFormat::Ac3);
+        assert!(!cfg.wav_output);
+        assert_eq!(cfg.effective_stereo_bitrate_kbps(), 192);
+        assert_eq!(cfg.effective_output_format().extension(), ".ac3");
+
+        // Loose parsing supports all formats
+        assert_eq!(OutputFormat::from_str_loose(".m4a"), Some(OutputFormat::M4a));
+        assert_eq!(OutputFormat::from_str_loose("w64"), Some(OutputFormat::W64));
+        assert_eq!(OutputFormat::from_str_loose("mp3"), Some(OutputFormat::Mp3));
+        assert_eq!(OutputFormat::from_str_loose("eac3"), Some(OutputFormat::Eac3));
+        assert_eq!(OutputFormat::from_str_loose("opus"), Some(OutputFormat::Opus));
+        assert_eq!(OutputFormat::from_str_loose("flac"), Some(OutputFormat::Flac));
+    }
+
+    #[test]
     fn test_viterbi_warp_and_streaming_catmull_rom_render() {
         let sr = 8000u32;
         let dur_sec = 80usize;

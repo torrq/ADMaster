@@ -2,7 +2,7 @@
 
 # ADMaster -- Pure-Rust Audio Description Synchronization & Mastering Studio
 
-**ADMaster** (`v2.0.1`) is a high-performance, low-memory pure-Rust desktop studio (`admaster`) and standalone command-line interface (`admaster-cli`) for synchronizing, time-warping, downmixing, loudness-normalizing, and multiplexing Audio Description (AD) and secondary audio tracks for movies and television series.
+**ADMaster** (`v2.0.2`) is a high-performance, low-memory pure-Rust desktop studio (`admaster`) and standalone command-line interface (`admaster-cli`) for synchronizing, time-warping, downmixing, loudness-normalizing, and multiplexing Audio Description (AD) and secondary audio tracks for movies and television series.
 
 It combines **100-anchor 3-band narration-suppressed SIMD FFT cross-correlation** with a native Rust implementation of the **[ADSync](https://github.com/JohnnyTheCoder1/ADSync)** non-linear alignment architecture (STFT acoustic landmark constellation PAL speed probing, second-order Viterbi candidate lattice dynamic programming, monotone Fritsch-Carlson PCHIP cubic spline warping, micro-blip spur filtering, and silence-nudged cut boundary refinement), plus a **streaming 30-second Catmull-Rom cubic warp renderer** and **windowed Master Audio gap splicer** that keep peak memory usage under **55 MB RAM** even on 3.5-hour feature films.
 
@@ -27,6 +27,7 @@ Launch `admaster` (or `admaster.exe` on Windows, `ADMaster.app` on macOS) and dr
 * **Step 2 -- Tracks to Sync**: Drop one or more Audio Description or secondary audio files (`.mp3`, `.m4a`, `.flac`, `.aac`, `.ogg`, `.opus`, `.wav`, `.w64`, `.ac3`, `.eac3`, `.mka`) with live output filename previews.
 * **Movie Project Folder Drop**: Drop a folder containing `source/` and `tosync/` to automatically pair the reference master with all candidate tracks.
 * **Live Progress & Instant Cancel**: Watch per-track status, Overall + Current Task progress bars driven by live FFmpeg and `mkvmerge` progress streams, click the timer pill to toggle `Elapsed <-> ETA`, or click **Cancel Sync** to terminate running subprocesses immediately and clean up partial outputs.
+* **Output Format & Bitrate**: Defaults to `AAC (.m4a)` at `256 kbps`, with one-click switching (top bar or **Settings -> Encoding**) to `WAV (.wav)`, `Wave64 (.w64)`, `FLAC (.flac)`, `MP3 (.mp3)`, `AC3 (.ac3)`, `EAC3 (.eac3)`, and `Opus (.opus)`, plus configurable Stereo and 5.1 Surround AC3 bitrates.
 * **Session Logs**: Saved alongside the source MKV folder by default. Customize the log folder and token-based filename pattern (`{title}`, `{mkv}`, `{date}`, `{time}`, `{datetime}`, `{tracks}`, `{method}`) in **Settings -> Appearance & Logs**.
 
 ### 2. Command-Line Interface (`admaster-cli`)
@@ -51,7 +52,7 @@ admaster-cli "F:\uploads\queue\Movie1" --wav --no-night
 admaster-cli "F:\uploads\queue\Movie1" --preview 180 -m --log-pattern "{mkv}_sync_{date}.log"
 ```
 
-Run `admaster-cli --help` for the complete list of flags (`--anchors`, `--min-confidence`, `--offset-only`, `--pal`, `--no-pal`, `--no-speed-detect`, `--no-multiband`, `--no-gap-fill`, `--stereo-only`, `--target-i`, `--target-tp`, `--threads`, `--clean-scratch`, `--keep-scratch`, `--log-dir`, `--log-pattern`, `--no-log-to-file`, `--no-render`, `--json`).
+Run `admaster-cli --help` for the complete list of flags (`--format`, `--bitrate`, `--surround-bitrate`, `--anchors`, `--min-confidence`, `--offset-only`, `--pal`, `--no-pal`, `--no-speed-detect`, `--no-multiband`, `--no-gap-fill`, `--stereo-only`, `--target-i`, `--target-tp`, `--threads`, `--clean-scratch`, `--keep-scratch`, `--log-dir`, `--log-pattern`, `--no-log-to-file`, `--no-render`, `--json`).
 
 ---
 

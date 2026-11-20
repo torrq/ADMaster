@@ -1,4 +1,4 @@
-use crate::config::{AppConfig, PalMode, SyncMode};
+use crate::config::{AppConfig, OutputFormat, PalMode, SyncMode};
 use crate::dsp::correlation::{
     evaluate_anchor_correlations, find_offset_candidates, AnchorMeasurement, OffsetCluster,
 };
@@ -772,19 +772,30 @@ pub fn process_explicit_inputs(
             p.file_name().and_then(|s| s.to_str()).unwrap_or("")
         ));
     }
+    let out_fmt = config.effective_output_format();
+    let stereo_br = config.effective_stereo_bitrate_kbps();
+    let surr_br = config.effective_surround_bitrate_kbps();
     if config.stereo_only {
-        emit_log("Stereo Only     : [OK] YES (Downmix to True 2.0 Stereo AAC, no surround output)".to_string());
+        emit_log(format!(
+            "Stereo Only     : [OK] YES (Downmix to True 2.0 {}, no surround output)",
+            out_fmt.codec_name()
+        ));
     } else if config.convert_main {
-        emit_log("Convert Main    : [OK] YES (Surround AC3 + True 2.0 Stereo AAC + Night Mode AAC)".to_string());
+        emit_log(format!(
+            "Convert Main    : [OK] YES (Surround AC3 {}k + True 2.0 {} + Night Mode)",
+            surr_br,
+            out_fmt.codec_name()
+        ));
     }
     if config.mux_final_mkv {
         emit_log("Mux Final MKV   : [OK] YES (Video + Stereo Audio + English Subtitles)".to_string());
     }
     emit_log(format!("Sync Mode       : {}", config.sync_mode.label()));
     emit_log(format!("PAL Mode        : {}", config.pal_mode.label()));
-    if config.wav_output {
-        emit_log("Audio Format    : 16-bit 48kHz PCM WAV (--wav)".to_string());
-    }
+    emit_log(format!(
+        "Audio Format    : {}",
+        out_fmt.summary_tag(stereo_br)
+    ));
     if let Some(psec) = config.preview_sec {
         emit_log(format!("Preview Mode    : ON ({:.0} seconds)", psec));
     }
@@ -836,7 +847,7 @@ pub fn process_explicit_inputs(
     } else {
         String::new()
     };
-    let ext = if config.wav_output { ".wav" } else { ".m4a" };
+    let ext = out_fmt.extension();
 
     // Pre-check if all deliverables already exist
     let mut expected_outputs = Vec::new();
@@ -1927,9 +1938,14 @@ where
             tracker.skip_weight(0.5);
             main_w_used += 0.5;
         } else {
-            let lbl = "Encoding Main 5.1 Surround AC3 (640k)...";
-            tracker.begin_task(3, "Step 4 of 4 -- Encoding Movie Audio", 0.5, lbl, 1000);
-            emit_log("  [1/3] Encoding 5.1 Surround AC3 (640k)...".to_string());
+            let surr_br = config.effective_surround_bitrate_kbps();
+            let surr_br_arg = format!("{}k", surr_br);
+            let lbl = format!("Encoding Main 5.1 Surround AC3 ({})...", surr_br_arg);
+            tracker.begin_task(3, "Step 4 of 4 -- Encoding Movie Audio", 0.5, &lbl, 1000);
+            emit_log(format!(
+                "  [1/3] Encoding 5.1 Surround AC3 ({})...",
+                surr_br_arg
+            ));
             let mut cmd = Command::new(ffmpeg_bin);
             apply_no_window(&mut cmd);
             cmd.args([
@@ -1953,7 +1969,7 @@ where
                 "-c:a",
                 "ac3",
                 "-b:a",
-                "640k",
+                &surr_br_arg,
                 "-ar",
                 "48000",
                 "-progress",
@@ -1967,7 +1983,7 @@ where
                 cancel_flag,
                 Some(render_duration),
                 Some(&out_surround),
-                |f| tracker.update_frac(lbl, f),
+                |f| tracker.update_frac(&lbl, f),
             )?;
             tracker.finish_task();
             main_w_used += 0.5;
@@ -1983,12 +1999,10 @@ where
         }
     }
 
-    let ext = if config.wav_output { ".wav" } else { ".m4a" };
-    let codec_label = if config.wav_output {
-        "WAV PCM"
-    } else {
-        "AAC 2.0"
-    };
+    let out_fmt = config.effective_output_format();
+    let stereo_br = config.effective_stereo_bitrate_kbps();
+    let ext = out_fmt.extension();
+    let codec_label = out_fmt.codec_name();
     let out_stereo = out_dir.join(format!("{} (Stereo){}{}", base_title, suffix, ext));
     let out_night = out_dir.join(format!("{} (Night Mode){}{}", base_title, suffix, ext));
 
@@ -2101,7 +2115,8 @@ where
             &stereo_wav,
             &out_stereo,
             "alimiter=level_in=1:level_out=0.98:limit=0.98",
-            config.wav_output,
+            out_fmt,
+            stereo_br,
             config.threads,
             render_duration,
             cancel_flag,
@@ -2140,7 +2155,8 @@ where
                 &stereo_wav,
                 &out_night,
                 &ln_filter,
-                config.wav_output,
+                out_fmt,
+                stereo_br,
                 config.threads,
                 render_duration,
                 cancel_flag,
@@ -2192,12 +2208,10 @@ where
     } else {
         String::new()
     };
-    let ext = if config.wav_output { ".wav" } else { ".m4a" };
-    let codec_name = if config.wav_output {
-        "WAV PCM"
-    } else {
-        "AAC 2.0"
-    };
+    let out_fmt = config.effective_output_format();
+    let stereo_br = config.effective_stereo_bitrate_kbps();
+    let ext = out_fmt.extension();
+    let codec_name = out_fmt.codec_name();
 
     let label_prefix = if total_ad_count == 1 {
         format!("{}-AD", base_title)
@@ -2536,7 +2550,8 @@ where
         &temp_wav,
         &out_stereo,
         "alimiter=level_in=1:level_out=0.98:limit=0.98",
-        config.wav_output,
+        out_fmt,
+        stereo_br,
         config.threads,
         render_duration,
         cancel_flag,
@@ -2575,7 +2590,8 @@ where
             &temp_wav,
             &out_night,
             &ln_filter,
-            config.wav_output,
+            out_fmt,
+            stereo_br,
             config.threads,
             render_duration,
             cancel_flag,
@@ -2643,7 +2659,8 @@ fn encode_deliverable_from_wav<F>(
     in_wav: &Path,
     out_path: &Path,
     af_filter: &str,
-    wav_output: bool,
+    output_format: OutputFormat,
+    bitrate_kbps: u32,
     threads: usize,
     expected_duration_sec: f64,
     cancel_flag: &AtomicBool,
@@ -2667,10 +2684,24 @@ where
     .arg(in_wav)
     .args(["-af", af_filter, "-ac", "2", "-ar", "48000"]);
 
-    if wav_output {
-        cmd.args(["-c:a", "pcm_s16le", "-rf64", "auto"]);
-    } else {
-        cmd.args(["-c:a", "aac", "-b:a", "256k"]);
+    match output_format {
+        OutputFormat::Wav => {
+            cmd.args(["-c:a", "pcm_s16le", "-rf64", "auto"]);
+        }
+        OutputFormat::W64 => {
+            cmd.args(["-c:a", "pcm_s16le", "-f", "w64"]);
+        }
+        OutputFormat::Flac => {
+            cmd.args(["-c:a", "flac"]);
+        }
+        OutputFormat::M4a
+        | OutputFormat::Mp3
+        | OutputFormat::Ac3
+        | OutputFormat::Eac3
+        | OutputFormat::Opus => {
+            let br_str = format!("{}k", output_format.clamp_bitrate(bitrate_kbps));
+            cmd.args(["-c:a", output_format.ffmpeg_codec(), "-b:a", &br_str]);
+        }
     }
     cmd.args(["-progress", "pipe:1", "-nostats"]).arg(out_path);
 

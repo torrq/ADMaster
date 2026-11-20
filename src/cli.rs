@@ -1,4 +1,4 @@
-use crate::config::{AppConfig, PalMode, SyncMode};
+use crate::config::{AppConfig, OutputFormat, PalMode, SyncMode};
 use crate::pipeline::{spawn_pipeline_job, JobTarget, MovieJobReport, PipelineEvent};
 use crossbeam_channel::unbounded;
 use std::io::{IsTerminal, Write};
@@ -225,7 +225,51 @@ fn parse_cli_args_with_mode(
             }
             "--wav" => {
                 headless = true;
-                config.wav_output = true;
+                config.set_output_format(OutputFormat::Wav);
+            }
+            "--format" => {
+                headless = true;
+                let v = need_val!();
+                match OutputFormat::from_str_loose(v) {
+                    Some(fmt) => config.set_output_format(fmt),
+                    None => {
+                        return CliAction::PrintAndExit(
+                            2,
+                            format!(
+                                "Unsupported --format '{}'. Supported: m4a, wav, w64, flac, mp3, ac3, eac3, opus",
+                                v
+                            ),
+                        );
+                    }
+                }
+            }
+            "--bitrate" => {
+                headless = true;
+                let v = need_val!();
+                let clean = v.trim().trim_end_matches(|c: char| c == 'k' || c == 'K');
+                match clean.parse::<u32>() {
+                    Ok(kbps) if kbps > 0 => config.audio_bitrate_kbps = kbps,
+                    _ => {
+                        return CliAction::PrintAndExit(
+                            2,
+                            format!("Invalid --bitrate '{}'. Example: --bitrate 256 or --bitrate 320k", v),
+                        );
+                    }
+                }
+            }
+            "--surround-bitrate" => {
+                headless = true;
+                let v = need_val!();
+                let clean = v.trim().trim_end_matches(|c: char| c == 'k' || c == 'K');
+                match clean.parse::<u32>() {
+                    Ok(kbps) if kbps > 0 => config.surround_bitrate_kbps = kbps,
+                    _ => {
+                        return CliAction::PrintAndExit(
+                            2,
+                            format!("Invalid --surround-bitrate '{}'. Supported: 384, 448, 640", v),
+                        );
+                    }
+                }
             }
             "--convert-main" => {
                 headless = true;
@@ -546,7 +590,10 @@ Deliverables & Encoding:\n\
   --convert-main            Convert & downmix reference main audio (Surround AC3 + Stereo AAC + Night Mode AAC)\n\
   --stereo-only             Downmix reference main audio to True 2.0 Stereo only (skip Surround AC3)\n\
   --no-night                Disable Night Mode (EBU R128 loudnorm) deliverables\n\
-  --wav                     Output uncompressed 16-bit 48kHz PCM WAV instead of AAC (rapid testing)\n\
+  --format <FMT>            Output audio format: m4a (default), wav, w64, flac, mp3, ac3, eac3, opus\n\
+  --bitrate <KBPS>          Output stereo bitrate for lossy formats (e.g. 128, 192, 256, 320)\n\
+  --surround-bitrate <KBPS> 5.1 Surround AC3 bitrate when converting main audio (384, 448, 640)\n\
+  --wav                     Shorthand for --format wav (16-bit 48kHz PCM WAV)\n\
   --mux                     Multiplex final MKV (video + stereo audio + English subtitles) via mkvmerge\n\
   --mkv-dir <DIR>           Destination directory for final multiplexed MKV\n\
   -m, --mux-video <PATH>    Multiplex a preview video sample MKV\n\

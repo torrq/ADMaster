@@ -100,6 +100,175 @@ impl PalMode {
     }
 }
 
+pub const SURROUND_BITRATE_OPTIONS: &[u32] = &[384, 448, 640];
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OutputFormat {
+    #[default]
+    M4a,
+    Wav,
+    W64,
+    Flac,
+    Mp3,
+    Ac3,
+    Eac3,
+    Opus,
+}
+
+impl OutputFormat {
+    pub fn all() -> &'static [OutputFormat] {
+        &[
+            OutputFormat::M4a,
+            OutputFormat::Wav,
+            OutputFormat::W64,
+            OutputFormat::Flac,
+            OutputFormat::Mp3,
+            OutputFormat::Ac3,
+            OutputFormat::Eac3,
+            OutputFormat::Opus,
+        ]
+    }
+
+    pub fn extension(self) -> &'static str {
+        match self {
+            OutputFormat::M4a => ".m4a",
+            OutputFormat::Wav => ".wav",
+            OutputFormat::W64 => ".w64",
+            OutputFormat::Flac => ".flac",
+            OutputFormat::Mp3 => ".mp3",
+            OutputFormat::Ac3 => ".ac3",
+            OutputFormat::Eac3 => ".eac3",
+            OutputFormat::Opus => ".opus",
+        }
+    }
+
+    pub fn short_name(self) -> &'static str {
+        match self {
+            OutputFormat::M4a => "M4A",
+            OutputFormat::Wav => "WAV",
+            OutputFormat::W64 => "W64",
+            OutputFormat::Flac => "FLAC",
+            OutputFormat::Mp3 => "MP3",
+            OutputFormat::Ac3 => "AC3",
+            OutputFormat::Eac3 => "EAC3",
+            OutputFormat::Opus => "Opus",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            OutputFormat::M4a => "AAC (.m4a) -- Default",
+            OutputFormat::Wav => "WAV (.wav) -- Uncompressed 16-bit PCM",
+            OutputFormat::W64 => "Wave64 (.w64) -- Uncompressed 64-bit PCM",
+            OutputFormat::Flac => "FLAC (.flac) -- Compressed Lossless",
+            OutputFormat::Mp3 => "MP3 (.mp3) -- Universal Legacy",
+            OutputFormat::Ac3 => "AC3 (.ac3) -- Standard Broadcast",
+            OutputFormat::Eac3 => "EAC3 (.eac3) -- Enhanced AC3",
+            OutputFormat::Opus => "Opus (.opus) -- High-Efficiency Open Codec",
+        }
+    }
+
+    pub fn codec_name(self) -> &'static str {
+        match self {
+            OutputFormat::M4a => "AAC 2.0",
+            OutputFormat::Wav => "WAV PCM",
+            OutputFormat::W64 => "Wave64 PCM",
+            OutputFormat::Flac => "FLAC 2.0",
+            OutputFormat::Mp3 => "MP3 2.0",
+            OutputFormat::Ac3 => "AC3 2.0",
+            OutputFormat::Eac3 => "EAC3 2.0",
+            OutputFormat::Opus => "Opus 2.0",
+        }
+    }
+
+    pub fn ffmpeg_codec(self) -> &'static str {
+        match self {
+            OutputFormat::M4a => "aac",
+            OutputFormat::Wav => "pcm_s16le",
+            OutputFormat::W64 => "pcm_s16le",
+            OutputFormat::Flac => "flac",
+            OutputFormat::Mp3 => "libmp3lame",
+            OutputFormat::Ac3 => "ac3",
+            OutputFormat::Eac3 => "eac3",
+            OutputFormat::Opus => "libopus",
+        }
+    }
+
+    pub fn is_lossless(self) -> bool {
+        matches!(self, OutputFormat::Wav | OutputFormat::W64 | OutputFormat::Flac)
+    }
+
+    pub fn bitrate_options(self) -> &'static [u32] {
+        match self {
+            OutputFormat::M4a => &[128, 192, 256, 320],
+            OutputFormat::Mp3 => &[128, 192, 256, 320],
+            OutputFormat::Ac3 => &[192, 256, 320, 384, 448, 640],
+            OutputFormat::Eac3 => &[128, 192, 256, 384, 448],
+            OutputFormat::Opus => &[96, 128, 160, 192, 256],
+            OutputFormat::Wav | OutputFormat::W64 | OutputFormat::Flac => &[],
+        }
+    }
+
+    pub fn default_bitrate_kbps(self) -> u32 {
+        match self {
+            OutputFormat::Opus => 160,
+            OutputFormat::Wav | OutputFormat::W64 | OutputFormat::Flac => 0,
+            _ => 256,
+        }
+    }
+
+    pub fn clamp_bitrate(self, kbps: u32) -> u32 {
+        let opts = self.bitrate_options();
+        if opts.is_empty() {
+            return 0;
+        }
+        if kbps == 0 {
+            return self.default_bitrate_kbps();
+        }
+        *opts
+            .iter()
+            .min_by_key(|&&opt| opt.abs_diff(kbps))
+            .unwrap_or(&opts[0])
+    }
+
+    pub fn from_str_loose(s: &str) -> Option<Self> {
+        match s.trim().trim_start_matches('.').to_ascii_lowercase().as_str() {
+            "m4a" | "aac" => Some(OutputFormat::M4a),
+            "wav" | "pcm" => Some(OutputFormat::Wav),
+            "w64" | "wave64" => Some(OutputFormat::W64),
+            "flac" => Some(OutputFormat::Flac),
+            "mp3" => Some(OutputFormat::Mp3),
+            "ac3" => Some(OutputFormat::Ac3),
+            "eac3" | "ec3" => Some(OutputFormat::Eac3),
+            "opus" => Some(OutputFormat::Opus),
+            _ => None,
+        }
+    }
+
+    pub fn summary_tag(self, bitrate_kbps: u32) -> String {
+        if self.is_lossless() {
+            match self {
+                OutputFormat::Wav => "WAV (16-bit 48 kHz PCM)".to_string(),
+                OutputFormat::W64 => "Wave64 (16-bit 48 kHz PCM)".to_string(),
+                OutputFormat::Flac => "FLAC (Lossless 48 kHz)".to_string(),
+                _ => self.codec_name().to_string(),
+            }
+        } else {
+            let br = self.clamp_bitrate(bitrate_kbps);
+            format!("{} ({} kbps, 48 kHz)", self.codec_name(), br)
+        }
+    }
+
+    pub fn compact_label(self, bitrate_kbps: u32) -> String {
+        if self.is_lossless() {
+            self.short_name().to_string()
+        } else {
+            let br = self.clamp_bitrate(bitrate_kbps);
+            format!("{} {}k", self.short_name(), br)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -133,6 +302,9 @@ pub struct AppConfig {
     pub stereo_only: bool,
     pub generate_night_mode: bool,
     pub mux_final_mkv: bool,
+    pub output_format: OutputFormat,
+    pub audio_bitrate_kbps: u32,
+    pub surround_bitrate_kbps: u32,
     pub wav_output: bool,
     pub target_i: f64,
     pub target_tp: f64,
@@ -181,6 +353,9 @@ impl Default for AppConfig {
             stereo_only: false,
             generate_night_mode: true,
             mux_final_mkv: false,
+            output_format: OutputFormat::M4a,
+            audio_bitrate_kbps: 256,
+            surround_bitrate_kbps: 640,
             wav_output: false,
             target_i: -16.0,
             target_tp: -1.5,
@@ -512,6 +687,38 @@ impl AppConfig {
             .map_err(|e| format!("Failed to write config '{}': {}", path.display(), e))
     }
 
+    pub fn set_output_format(&mut self, fmt: OutputFormat) {
+        self.output_format = fmt;
+        self.wav_output = fmt == OutputFormat::Wav;
+        if !fmt.is_lossless() {
+            if self.audio_bitrate_kbps == 0 {
+                self.audio_bitrate_kbps = fmt.default_bitrate_kbps();
+            } else {
+                self.audio_bitrate_kbps = fmt.clamp_bitrate(self.audio_bitrate_kbps);
+            }
+        }
+    }
+
+    pub fn effective_output_format(&self) -> OutputFormat {
+        if self.wav_output && self.output_format == OutputFormat::M4a {
+            OutputFormat::Wav
+        } else {
+            self.output_format
+        }
+    }
+
+    pub fn effective_stereo_bitrate_kbps(&self) -> u32 {
+        self.effective_output_format()
+            .clamp_bitrate(self.audio_bitrate_kbps)
+    }
+
+    pub fn effective_surround_bitrate_kbps(&self) -> u32 {
+        *SURROUND_BITRATE_OPTIONS
+            .iter()
+            .min_by_key(|&&opt| opt.abs_diff(self.surround_bitrate_kbps))
+            .unwrap_or(&640)
+    }
+
     pub fn sanitize(&mut self) {
         self.anchors = self.anchors.clamp(5, 500);
         self.min_confidence = self.min_confidence.clamp(0.01, 0.95);
@@ -520,6 +727,16 @@ impl AppConfig {
         self.discontinuity_threshold = self.discontinuity_threshold.clamp(0.20, 5.0);
         self.target_i = self.target_i.clamp(-30.0, -5.0);
         self.target_tp = self.target_tp.clamp(-9.0, 0.0);
+        if self.wav_output && self.output_format == OutputFormat::M4a {
+            self.output_format = OutputFormat::Wav;
+        }
+        self.wav_output = self.output_format == OutputFormat::Wav;
+        if !self.output_format.is_lossless() {
+            self.audio_bitrate_kbps = self.output_format.clamp_bitrate(self.audio_bitrate_kbps);
+        } else if self.audio_bitrate_kbps == 0 {
+            self.audio_bitrate_kbps = 256;
+        }
+        self.surround_bitrate_kbps = self.effective_surround_bitrate_kbps();
         if self.ref_stream.trim().is_empty() {
             self.ref_stream = "0:a:0".to_string();
         }

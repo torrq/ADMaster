@@ -1,6 +1,6 @@
 # ADMaster -- Pure-Rust Studio & DSP Architecture Guidelines
 
-## 1. Repository Architecture (`v2.0.1`)
+## 1. Repository Architecture (`v2.0.2`)
 
 **ADMaster** is a pure-Rust desktop GUI studio (`admaster`) and headless CLI (`admaster-cli`) built with `egui` / `eframe`, `rustfft`, `rayon`, and external `ffmpeg` / `ffprobe` / `mkvmerge` subprocesses. Legacy Python sync scripts and DescribeAlign were retired in `v2.0.0`.
 

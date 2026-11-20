@@ -194,51 +194,33 @@ jobs:
           generate_release_notes: false
           body: |
             ```text
-            ADMaster v2.0.1 Changelog
+            ADMaster v2.0.2 Changelog
             =========================
 
-            Sync Accuracy Fixes (Correlation & Time-Warp Verified on US + UK Tracks)
-            ------------------------------------------------------------------------
-            - Fixed PAL auto-detection falsely forcing a 25fps -> 23.976fps slowdown
-              based on "[UK]" filename clues; Auto-Detect now always decodes at native
-              1.0x and runs the acoustic landmark constellation speed prober to verify
-              true PAL transfers without corrupting native-speed UK tracks.
-            - Fixed Time-Warp offset_hint sign inversion between 100-anchor correlation
-              and the Viterbi candidate lattice, eliminating false cut hallucinations
-              and ensuring clean alignment.
-            - Aligned STFT 70th-percentile peak flooring, edge stripping, and spline
-              endpoint gap detection with upstream ADSync, and added micro-blip spur
-              filtering for single-segment continuity.
-            - Confirmed both single-offset Correlation and non-linear Time-Warp modes
-              produce clean, in-sync outputs across both US and UK Audio Description
-              tracks.
-
-            15x Faster DSP Engine & Non-Linear Time-Warp
+            Output Format & Bitrate Controls (GUI + CLI)
             --------------------------------------------
-            - Replaced repeated per-anchor FFT planning with a thread-local cached
-              5-smooth f32 SIMD FFT using 2-real-in-1 Hermitian packing.
-            - Rebuilt landmark histogram matching as a single-pass O(n_matches) bucket
-              accumulator and pre-computed multiband signals once per track.
-            - Added fingerprint-guided tight interior search windows for fast, accurate
-              feature-length alignment.
+            - Added a dedicated Output Format & Bitrate section under Settings ->
+              Encoding, defaulting to AAC (.m4a) @ 256 kbps with selectable switching
+              to WAV (.wav, 16-bit PCM with RF64 auto), Wave64 (.w64), FLAC (.flac),
+              MP3 (.mp3), AC3 (.ac3), EAC3 (.eac3), and Opus (.opus).
+            - Added codec-aware stereo bitrate selectors (128k-320k for AAC/MP3,
+              192k-640k for AC3, 128k-448k for EAC3, 96k-256k for Opus, and automatic
+              Lossless indicator for WAV/Wave64/FLAC), plus configurable 5.1 Surround
+              AC3 bitrate (384k / 448k / 640k) for Convert Main Audio deliverables.
+            - Replaced the standalone WAV toggle in the Workspace options bar with a
+              compact Format selector and wired live Step 2 "Saves as:" previews and
+              Settings output previews to reflect the active container and bitrate.
+            - Added CLI parity flags: --format <m4a|wav|w64|flac|mp3|ac3|eac3|opus>,
+              --bitrate <kbps>, and --surround-bitrate <kbps> (preserving --wav as a
+              shorthand for --format wav and automatically upgrading legacy config.toml
+              wav_output=true preferences).
 
-            Friendly Report Card UI, Live Progress & Stream Inspector
-            ---------------------------------------------------------
-            - Redesigned the desktop workspace into a clean vertical Step 1 / Step 2
-              staging flow with live output filename previews and an async ffprobe
-              "Match Against" audio stream selector showing language, channel layout,
-              codec, and default/commentary flags.
-            - Added a live 4-stage progress dashboard with per-track progress, dual
-              Overall and Current Task progress bars driven by real-time FFmpeg and
-              mkvmerge progress parsing, and clickable Elapsed <-> ETA timers.
-            - Upgraded the Sync Report to the Layout C Friendly Report Card: prominent
-              plain-English sync summary banner, 4-card sync checklist, visual Movie
-              Structure Map filmstrip, interactive hover alignment timeline, and
-              Output Files Ready with Reveal/Open Folder actions.
-            - Added instant FFmpeg/mkvmerge cancellation that terminates running child
-              processes immediately and cleans up partial output files.
-            - Session logs now save alongside the source MKV folder by default, with
-              customizable output folder and token-based log filename templates in
-              Settings -> Appearance & Logs (and --log-pattern in admaster-cli).
+            Included From v2.0.1
+            --------------------
+            - Correlation & Time-Warp accuracy fixes verified on both US and UK tracks,
+              15x faster packed SIMD FFT + single-pass landmark matching, Layout C
+              Friendly Report Card UI, async ffprobe Match Against stream picker, dual
+              progress meters with clickable Elapsed <-> ETA timers, instant FFmpeg
+              cancellation, and customizable MKV-folder session logs.
             ```
           files: dist/*
