@@ -201,8 +201,8 @@ jobs:
             ------------------------------------------------------------------------
             - Fixed PAL auto-detection falsely forcing a 25fps -> 23.976fps slowdown
               based on "[UK]" filename clues; Auto-Detect now always decodes at native
-              1.0x and runs the Shazam-style constellation speed prober to verify true
-              PAL transfers without corrupting native-speed UK tracks.
+              1.0x and runs the acoustic landmark constellation speed prober to verify
+              true PAL transfers without corrupting native-speed UK tracks.
             - Fixed Time-Warp offset_hint sign inversion between 100-anchor correlation
               and the Viterbi candidate lattice, eliminating false cut hallucinations
               and ensuring clean alignment.

@@ -1081,7 +1081,7 @@ pub fn process_explicit_inputs(
         });
 
         // Decode 8kHz mono AD analysis WAV & probe acoustic landmarks for genuine speed/PAL transfers.
-        // Never blindly force PAL slowdown from region tags like "[UK]" -- UK digital/Blu-ray AD tracks
+        // Never blindly force PAL slowdown from region tags like "[UK]" -- UK digital/disc AD tracks
         // are frequently native 23.976fps and forcing a 4.27% slowdown destroys alignment.
         let ad_samples: Vec<f32> = match config.pal_mode {
             PalMode::ForcePal => {

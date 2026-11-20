@@ -89,7 +89,7 @@ struct Peak {
     mag_db: f32,
 }
 
-/// Extracts Shazam-style constellation landmark hashes `(hash_u32, anchor_time_sec)` using a streaming
+/// Extracts STFT spectral peak-pair landmark hashes `(hash_u32, anchor_time_sec)` using a streaming
 /// ring-buffer STFT so memory never exceeds ~2 MB regardless of movie duration.
 pub fn extract_landmarks(y: &[f32], sr: u32) -> (Vec<u32>, Vec<f32>) {
     if y.len() < N_FFT {

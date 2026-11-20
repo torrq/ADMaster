@@ -6,9 +6,8 @@ description: Comprehensive guide and automation workflows for Matroska (MKV) met
 # Matroska (MKV) Media Management
 
 ## Communication Guidelines
-* Keep responses extremely concise.
-* Eliminate conversational filler, personality, and excessive exclamations.
-* Provide scripts, commands, and factual explanations only.
+* Keep responses concise and factual.
+* Provide commands and clear technical explanations only.
 
 ---
 
@@ -21,13 +20,13 @@ description: Comprehensive guide and automation workflows for Matroska (MKV) met
 | Selector Syntax | Target | Description | Example |
 | :--- | :--- | :--- | :--- |
 | `--edit track:=<UID>` | Track UID | **Primary Standard (Safest & Unambiguous)**: Targets the exact 64-bit unsigned integer `track_uid`. | `--edit track:=1426943748200331858` |
-| `--edit track:a<N>` | Audio Stream Index | Targets the $N$-th audio track (1-based relative index). | `--edit track:a2` |
-| `--edit track:v<N>` | Video Stream Index | Targets the $N$-th video track (1-based relative index). | `--edit track:v1` |
-| `--edit track:s<N>` | Subtitle Stream Index | Targets the $N$-th subtitle track (1-based relative index). | `--edit track:s1` |
+| `--edit track:a<N>` | Audio Stream Index | Targets the N-th audio track (1-based relative index). | `--edit track:a2` |
+| `--edit track:v<N>` | Video Stream Index | Targets the N-th video track (1-based relative index). | `--edit track:v1` |
+| `--edit track:s<N>` | Subtitle Stream Index | Targets the N-th subtitle track (1-based relative index). | `--edit track:s1` |
 | `--edit track:@<NUM>` | Track Number | Targets the sequential track index in the MKV header. | `--edit track:@3` |
 
 > [!CAUTION]
-> **Track Selector Prefix Bug:** Never pass `--edit track:@<UID>` when targeting a Track UID. `@` designates the relative Track Number; `=` designates the unique Track UID. Passing `@` with a UID results in `The file is analyzed... Error: No track corresponding to the edit specifications was found.`
+> **Track Selector Prefix Bug:** Never pass `--edit track:@<UID>` when targeting a Track UID. `@` designates the relative Track Number; `=` designates the unique Track UID. Passing `@` with a UID fails with `Error: No track corresponding to the edit specifications was found.`
 
 ### Common Track Flags & Metadata
 
@@ -66,18 +65,13 @@ mkvpropedit "Movie.mkv" --chapters "chapters.xml"
 
 ---
 
-## 3. Automated Batch Flagging Tools
+## 3. Automated Multiplexing in ADMaster
 
-### 3.1 Batch Commentary Flagging (`scripts/set_commentary_flags.py`)
-Inspects MKV headers via `mkvmerge -J` JSON inspection and automatically sets `flag-commentary=1` for tracks matching keyword criteria (`commentary`, `director`, `producer`, `filmmaker`, `writer`).
+`admaster` and `admaster-cli --mux` automatically invoke `mkvmerge` to combine the reference video, converted stereo main audio, synced Audio Description tracks (with `flag-visual-impaired` set), and English subtitles in a single pass:
 
 ```powershell
-# Flag all commentary tracks across an entire TV show or Movie directory:
-python scripts/set_commentary_flags.py "X:\video\TV\Show_Title\Show.S01.720p.BluRay.DD5.1.x264-Release"
+admaster-cli --ref "Movie.mkv" --ad "Track_AD.m4a" --convert-main --mux --mkv-dir "OutputDir"
 ```
-
-### 3.2 Plex Audio Description & Commentary Collections (`scripts/plex_ad_commentary_collections.py`)
-Scans media libraries to build smart collections and reports on files containing `flag-commentary=1` or `flag-visual-impaired=1`.
 
 ---
 

@@ -230,22 +230,22 @@ mod tests {
     fn test_log_filename_and_dir_tokens() {
         let mut cfg = AppConfig::default();
         assert!(cfg.log_dir.is_empty());
-        let mkv = Path::new("C:/Movies/Od/The.Odyssey.2026.1080p.mkv");
+        let mkv = Path::new("C:/Movies/Example/Example.Movie.2025.1080p.mkv");
         let resolved = cfg.resolve_log_dir(
             mkv,
-            Path::new("C:/Movies/Od"),
-            Path::new("C:/Movies/Od/output"),
-            "The Odyssey",
+            Path::new("C:/Movies/Example"),
+            Path::new("C:/Movies/Example/output"),
+            "Example Movie",
         );
-        assert_eq!(resolved, Path::new("C:/Movies/Od"));
+        assert_eq!(resolved, Path::new("C:/Movies/Example"));
 
         cfg.log_filename_pattern = "{mkv}_{method}_{tracks}t".to_string();
-        let fname = cfg.format_log_filename("The Odyssey", "The.Odyssey.2026.1080p", 2, "warp");
-        assert_eq!(fname, "The.Odyssey.2026.1080p_warp_2t.log");
+        let fname = cfg.format_log_filename("Example Movie", "Example.Movie.2025.1080p", 2, "warp");
+        assert_eq!(fname, "Example.Movie.2025.1080p_warp_2t.log");
 
         cfg.log_filename_pattern = "{title}_sync.txt".to_string();
-        let fname2 = cfg.format_log_filename("The Odyssey: Cut", "movie", 1, "corr");
-        assert_eq!(fname2, "The Odyssey_ Cut_sync.txt");
+        let fname2 = cfg.format_log_filename("Example Movie: Cut", "movie", 1, "corr");
+        assert_eq!(fname2, "Example Movie_ Cut_sync.txt");
     }
 
     #[test]

@@ -3189,8 +3189,8 @@ impl ADMasterApp {
                     ui,
                     &mut self.config.speed_detect,
                     "Automatic Acoustic Landmark PAL Probing",
-                    "Matches Shazam-style spectral peak pairs at native 1.0x and PAL 1.0427x before correlation",
-                    "Detects unlabelled PAL DVD/TV Audio Description captures automatically without requiring [UK] in the filename.",
+                    "Matches STFT spectral peak pairs at native 1.0x and PAL 1.0427x before correlation",
+                    "Detects unlabelled PAL broadcast/disc Audio Description captures automatically without requiring [UK] in the filename.",
                     pal,
                 );
             },
@@ -3281,7 +3281,7 @@ impl ADMasterApp {
                     ui,
                     &mut self.config.gap_fill,
                     "Windowed Reference Master Audio Gap Filling",
-                    "Splices level-matched Blu-ray soundtrack audio into excised scene voids with <15 MB RAM",
+                    "Splices level-matched reference soundtrack audio into excised scene voids with <15 MB RAM",
                     "Eliminates dead silence drops when syncing a Theatrical Cut AD track onto an Extended Cut video master.",
                     pal,
                 );
@@ -3722,7 +3722,7 @@ impl ADMasterApp {
                                 .color(pal.text_muted),
                         );
                         let tokens: &[(&str, &str)] = &[
-                            ("{title}", "Clean movie title, e.g. The Odyssey (2026)"),
+                            ("{title}", "Clean movie title, e.g. Example Movie (2025)"),
                             ("{mkv}", "Original movie filename without extension"),
                             ("{date}", "Current date (YYYY-MM-DD)"),
                             ("{time}", "Current time (HH-MM-SS)"),
@@ -3758,8 +3758,8 @@ impl ADMasterApp {
 
                     ui.add_space(6.0);
                     let sample_name = self.config.format_log_filename(
-                        "The Odyssey (2026)",
-                        "The.Odyssey.2026.1080p.MA.WEBRip",
+                        "Example Movie (2025)",
+                        "Example.Movie.2025.1080p",
                         2,
                         "warp",
                     );
@@ -3768,10 +3768,10 @@ impl ADMasterApp {
                     } else {
                         self.config
                             .resolve_log_dir(
-                                Path::new("<MKV Folder>/The.Odyssey.2026.mkv"),
+                                Path::new("<MKV Folder>/Example.Movie.2025.mkv"),
                                 Path::new("<MKV Folder>"),
                                 Path::new("<MKV Folder>/output"),
-                                "The Odyssey (2026)",
+                                "Example Movie (2025)",
                             )
                             .display()
                             .to_string()
@@ -4077,7 +4077,7 @@ impl ADMasterApp {
     ) {
         ui.label(
             RichText::new(
-                "Automatically aligns Audio Description tracks to reference Blu-ray and UHD MKV masters, correcting speed differences, alternate cuts, and missing scenes before rendering broadcast-ready stereo deliverables.",
+                "Automatically aligns Audio Description tracks to reference HD and UHD MKV masters, correcting speed differences, alternate cuts, and missing scenes before rendering broadcast-ready stereo deliverables.",
             )
             .size(13.0)
             .color(pal.text_primary),
