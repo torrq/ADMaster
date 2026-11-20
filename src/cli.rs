@@ -352,6 +352,10 @@ fn parse_cli_args_with_mode(
                 headless = true;
                 config.log_dir = need_val!().to_string();
             }
+            "--log-pattern" => {
+                headless = true;
+                config.log_filename_pattern = need_val!().to_string();
+            }
             "--no-stretch" | "--force-stretch" => {
                 headless = true;
             }
@@ -450,11 +454,13 @@ pub fn execute_headless(
 
     while let Ok(ev) = rx.recv() {
         match ev {
-            PipelineEvent::Started { .. } => {}
+            PipelineEvent::Started { .. }
+            | PipelineEvent::JobMeta { .. }
+            | PipelineEvent::TrackProgress { .. } => {}
             PipelineEvent::LogLine(line) => {
                 if !json_output {
                     if last_had_progress && is_tty {
-                        eprint!("\r{: <100}\r", "");
+                        eprint!("\r{: <108}\r", "");
                         let _ = std::io::stderr().flush();
                         last_had_progress = false;
                     }
@@ -462,13 +468,16 @@ pub fn execute_headless(
                 }
             }
             PipelineEvent::Progress {
+                overall_fraction,
                 step_label,
                 completed,
                 total,
+                ..
             } => {
                 if show_progress && is_tty && !json_output {
+                    let ov_pct = ((overall_fraction * 100.0).round() as u32).min(100);
                     let pct = ((completed * 100) / total.max(1)).min(100);
-                    eprint!("\r  [{:3}%] {: <85}", pct, step_label);
+                    eprint!("\r  [All {:3}% | Task {:3}%] {: <78}", ov_pct, pct, step_label);
                     let _ = std::io::stderr().flush();
                     last_had_progress = true;
                 }
@@ -551,6 +560,9 @@ File & Scratch Management:\n\
   -f, --overwrite           Overwrite existing deliverables in output/\n\
   --clean-scratch           Wipe scratch directory before running for a 100% clean run\n\
   --keep-scratch            Keep temporary analysis & intermediate WAVs in scratch/\n\
+  --log-dir <DIR>           Custom session log directory (Defaults to the MKV's folder)\n\
+  --log-pattern <PATTERN>   Log filename template (tokens: {{title}}, {{mkv}}, {{date}}, {{time}}, {{datetime}}, {{tracks}}, {{method}})\n\
+  --no-log-to-file          Disable writing session log files to disk\n\
   --no-render               Compute & cache alignment parameters only without rendering audio\n\
   --json                    Emit structured JSON job report to stdout\n\
   --print-config            Print effective TOML configuration and exit\n\

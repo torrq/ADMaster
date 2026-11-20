@@ -10,15 +10,15 @@ use crate::dsp::warp::{
 };
 use crate::media::{
     apply_no_window, format_stream_selector, get_audio_info, mux_final_mkv, mux_video_sample,
-    predecode_to_mono_wav, read_wav_mono_f32, ToolPaths, PAN_STEREO_BS775,
+    predecode_to_mono_wav, read_wav_mono_f32, run_cancellable_command, ToolPaths,
+    PAN_STEREO_BS775,
 };
-use chrono::Local;
 use crossbeam_channel::Sender;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -92,6 +92,7 @@ pub struct MovieJobReport {
     pub main_deliverables: Vec<PathBuf>,
     pub ad_results: Vec<TrackSyncResult>,
     pub final_mkv: Option<PathBuf>,
+    pub saved_log_path: Option<PathBuf>,
     pub elapsed_secs: f64,
     pub skipped: bool,
     pub log_text: String,
@@ -103,11 +104,27 @@ pub enum PipelineEvent {
         total_movies: usize,
         label: String,
     },
+    JobMeta {
+        movie_title: String,
+        ref_filename: String,
+        ref_summary: String,
+        track_names: Vec<(String, String)>,
+    },
+    TrackProgress {
+        track_index: usize,
+        fraction: f32,
+        done: bool,
+        note: String,
+    },
     LogLine(String),
     Progress {
+        overall_label: String,
+        overall_fraction: f32,
+        stage_index: usize,
         step_label: String,
         completed: usize,
         total: usize,
+        task_changed: bool,
     },
     MovieCompleted(MovieJobReport),
     BatchCompleted {
@@ -116,6 +133,120 @@ pub enum PipelineEvent {
     },
     Cancelled,
     Error(String),
+}
+
+/// Human-friendly duration formatting (e.g. `42s`, `1m 20s`, `1h 04m 12s`).
+pub fn format_human_duration(seconds: f64) -> String {
+    let s = seconds.max(0.0).round() as u64;
+    if s < 60 {
+        return format!("{}s", s);
+    }
+    let h = s / 3600;
+    let m = (s % 3600) / 60;
+    let rem = s % 60;
+    if h > 0 {
+        if rem > 0 {
+            format!("{}h {}m {}s", h, m, rem)
+        } else {
+            format!("{}h {}m", h, m)
+        }
+    } else if rem > 0 {
+        format!("{}m {}s", m, rem)
+    } else {
+        format!("{}m", m)
+    }
+}
+
+struct OverallTracker<'a> {
+    tx: &'a Sender<PipelineEvent>,
+    movie_idx: usize,
+    total_movies: usize,
+    done_weight: f64,
+    total_weight: f64,
+    current_weight: f64,
+    stage_index: usize,
+    overall_label: String,
+}
+
+impl<'a> OverallTracker<'a> {
+    fn new(
+        tx: &'a Sender<PipelineEvent>,
+        movie_idx: usize,
+        total_movies: usize,
+        total_weight: f64,
+    ) -> Self {
+        Self {
+            tx,
+            movie_idx,
+            total_movies: total_movies.max(1),
+            done_weight: 0.0,
+            total_weight: total_weight.max(0.001),
+            current_weight: 0.0,
+            stage_index: 0,
+            overall_label: "Preparing sync job...".to_string(),
+        }
+    }
+
+    fn overall_frac(&self, task_frac: f64) -> f32 {
+        let m_frac =
+            ((self.done_weight + self.current_weight * task_frac.clamp(0.0, 1.0)) / self.total_weight)
+                .clamp(0.0, 1.0);
+        let batch_frac =
+            ((self.movie_idx as f64) + m_frac) / (self.total_movies as f64);
+        batch_frac.clamp(0.0, 1.0) as f32
+    }
+
+    fn begin_task(
+        &mut self,
+        stage_index: usize,
+        overall_label: impl Into<String>,
+        weight: f64,
+        step_label: impl Into<String>,
+        total: usize,
+    ) {
+        self.stage_index = stage_index;
+        self.overall_label = overall_label.into();
+        self.current_weight = weight.max(0.0);
+        let _ = self.tx.send(PipelineEvent::Progress {
+            overall_label: self.overall_label.clone(),
+            overall_fraction: self.overall_frac(0.0),
+            stage_index: self.stage_index,
+            step_label: step_label.into(),
+            completed: 0,
+            total: total.max(1),
+            task_changed: true,
+        });
+    }
+
+    fn update_task(&self, step_label: impl Into<String>, completed: usize, total: usize) {
+        let tot = total.max(1);
+        let comp = completed.min(tot);
+        let tf = (comp as f64) / (tot as f64);
+        let _ = self.tx.send(PipelineEvent::Progress {
+            overall_label: self.overall_label.clone(),
+            overall_fraction: self.overall_frac(tf),
+            stage_index: self.stage_index,
+            step_label: step_label.into(),
+            completed: comp,
+            total: tot,
+            task_changed: false,
+        });
+    }
+
+    fn update_frac(&self, step_label: impl Into<String>, frac: f64) {
+        let f = frac.clamp(0.0, 1.0);
+        let pm = (f * 1000.0).round() as usize;
+        self.update_task(step_label, pm, 1000);
+    }
+
+    fn finish_task(&mut self) {
+        self.done_weight = (self.done_weight + self.current_weight).min(self.total_weight);
+        self.current_weight = 0.0;
+    }
+
+    fn skip_weight(&mut self, weight: f64) {
+        self.done_weight = (self.done_weight + weight).min(self.total_weight);
+    }
 }
 
 pub fn format_time_code(seconds: f64) -> String {
@@ -288,6 +419,8 @@ pub fn spawn_pipeline_job(
                         &config,
                         &tools,
                         no_render,
+                        0,
+                        1,
                         &cancel_flag,
                         &tx,
                     ) {
@@ -337,6 +470,8 @@ pub fn spawn_pipeline_job(
                         &config,
                         &tools,
                         no_render,
+                        i,
+                        total,
                         &cancel_flag,
                         &tx,
                     ) {
@@ -345,6 +480,10 @@ pub fn spawn_pipeline_job(
                             reports.push(rep);
                         }
                         Err(e) => {
+                            if cancel_flag.load(Ordering::Relaxed) || e == "Cancelled" {
+                                let _ = tx.send(PipelineEvent::Cancelled);
+                                return;
+                            }
                             let _ = tx.send(PipelineEvent::LogLine(format!(
                                 "  [ERROR] Failed processing '{}': {}",
                                 m_dir.display(),
@@ -384,8 +523,16 @@ pub fn spawn_pipeline_job(
                     total_movies: 1,
                     label: dir.display().to_string(),
                 });
-                match process_single_movie_dir(&dir, &config, &tools, no_render, &cancel_flag, &tx)
-                {
+                match process_single_movie_dir(
+                    &dir,
+                    &config,
+                    &tools,
+                    no_render,
+                    0,
+                    1,
+                    &cancel_flag,
+                    &tx,
+                ) {
                     Ok(rep) => {
                         let _ = tx.send(PipelineEvent::MovieCompleted(rep.clone()));
                         let _ = tx.send(PipelineEvent::BatchCompleted {
@@ -394,7 +541,7 @@ pub fn spawn_pipeline_job(
                         });
                     }
                     Err(e) => {
-                        if cancel_flag.load(Ordering::Relaxed) {
+                        if cancel_flag.load(Ordering::Relaxed) || e == "Cancelled" {
                             let _ = tx.send(PipelineEvent::Cancelled);
                         } else {
                             let _ = tx.send(PipelineEvent::Error(e));
@@ -425,6 +572,8 @@ pub fn spawn_pipeline_job(
                     &config,
                     &tools,
                     no_render,
+                    0,
+                    1,
                     &cancel_flag,
                     &tx,
                 ) {
@@ -436,7 +585,7 @@ pub fn spawn_pipeline_job(
                         });
                     }
                     Err(e) => {
-                        if cancel_flag.load(Ordering::Relaxed) {
+                        if cancel_flag.load(Ordering::Relaxed) || e == "Cancelled" {
                             let _ = tx.send(PipelineEvent::Cancelled);
                         } else {
                             let _ = tx.send(PipelineEvent::Error(e));
@@ -448,11 +597,14 @@ pub fn spawn_pipeline_job(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn process_single_movie_dir(
     target_dir: &Path,
     config: &AppConfig,
     tools: &ToolPaths,
     no_render: bool,
+    movie_idx: usize,
+    total_movies: usize,
     cancel_flag: &AtomicBool,
     tx: &Sender<PipelineEvent>,
 ) -> Result<MovieJobReport, String> {
@@ -474,6 +626,8 @@ pub fn process_single_movie_dir(
         config,
         tools,
         no_render,
+        movie_idx,
+        total_movies,
         cancel_flag,
         tx,
     )
@@ -504,6 +658,8 @@ pub fn process_explicit_inputs(
     config: &AppConfig,
     tools: &ToolPaths,
     no_render: bool,
+    movie_idx: usize,
+    total_movies: usize,
     cancel_flag: &AtomicBool,
     tx: &Sender<PipelineEvent>,
 ) -> Result<MovieJobReport, String> {
@@ -643,6 +799,34 @@ pub fn process_explicit_inputs(
     emit_log(format!("FFmpeg Threads  : {}", config.threads));
     emit_log("================================================================================".to_string());
 
+    // Notify GUI of movie metadata & track roster for Live Progress cards
+    let _ = tx.send(PipelineEvent::JobMeta {
+        movie_title: base_title.clone(),
+        ref_filename: ref_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Movie")
+            .to_string(),
+        ref_summary: format!(
+            "{}ch @ {} kHz  |  {}",
+            channels,
+            (ref_sr as f64) / 1000.0,
+            format_human_duration(target_duration)
+        ),
+        track_names: ad_inputs
+            .iter()
+            .map(|(n, p)| {
+                (
+                    n.clone(),
+                    p.file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("audio")
+                        .to_string(),
+                )
+            })
+            .collect(),
+    });
+
     let render_duration = config
         .preview_sec
         .map(|p| p.min(target_duration))
@@ -701,8 +885,23 @@ pub fn process_explicit_inputs(
         emit_log("  Skipping correlation analysis and rendering (use --overwrite to force).".to_string());
         emit_log("================================================================================\n".to_string());
 
-        let log_text = log_lines.join("\n");
-        maybe_save_log_file(config, &project_dir, &base_title, &log_text);
+        let mut log_text = log_lines.join("\n");
+        let saved_log_path = maybe_save_log_file(
+            config,
+            ref_path,
+            &project_dir,
+            &out_dir,
+            &base_title,
+            0,
+            "skipped",
+            &log_text,
+        );
+        if let Some(ref saved_log) = saved_log_path {
+            let line = format!("  [LOG] Saved session log: {}", saved_log.display());
+            let _ = tx.send(PipelineEvent::LogLine(line.clone()));
+            log_text.push('\n');
+            log_text.push_str(&line);
+        }
         return Ok(MovieJobReport {
             base_title,
             ref_path: ref_path.to_path_buf(),
@@ -716,11 +915,26 @@ pub fn process_explicit_inputs(
             main_deliverables: expected_outputs,
             ad_results: Vec::new(),
             final_mkv: None,
+            saved_log_path,
             elapsed_secs: job_start.elapsed().as_secs_f64(),
             skipped: true,
             log_text,
         });
     }
+
+    // Compute overall progress weights for smooth Dual-Progress tracking
+    let n_ads_f = ad_inputs.len() as f64;
+    let total_weight = (if ad_inputs.is_empty() { 0.0 } else { 1.0 })
+        + n_ads_f * 2.0
+        + if no_render {
+            0.0
+        } else {
+            (if convert_main { 2.0 } else { 0.0 })
+                + n_ads_f * 2.0
+                + (if config.mux_final_mkv { 1.0 } else { 0.0 })
+        };
+    let mut tracker = OverallTracker::new(tx, movie_idx, total_movies, total_weight.max(1.0));
+    let mut ref_weight_consumed = false;
 
     // 1. Acoustic Cross-Correlation & Native ADSync Viterbi+PCHIP Warp Alignment
     let sync_cache_path = scratch_dir.join("sync_params.json");
@@ -740,7 +954,7 @@ pub fn process_explicit_inputs(
         emit_log("\n=== COMPUTING ACOUSTIC ALIGNMENT PARAMETERS ===".to_string());
     }
 
-    for (name, ad_path) in ad_inputs {
+    for (t_idx, (name, ad_path)) in ad_inputs.iter().enumerate() {
         if cancel_flag.load(Ordering::Relaxed) {
             return Err("Cancelled".to_string());
         }
@@ -752,7 +966,17 @@ pub fn process_explicit_inputs(
         // Check scratch cache first
         if let Some(c_entry) = cached_map.get(name) {
             let want_warp = config.sync_mode == SyncMode::ForceWarp;
-            if (!want_warp || c_entry.method == "warp") && !config.clean_scratch {
+            let pal_ok = match config.pal_mode {
+                PalMode::ForcePal => c_entry.is_pal,
+                PalMode::ForceNative => !c_entry.is_pal,
+                PalMode::AutoDetect => true,
+            };
+            let cache_sane = c_entry.method != "warp" || c_entry.confidence >= 0.12;
+            if (!want_warp || c_entry.method == "warp")
+                && pal_ok
+                && cache_sane
+                && !config.clean_scratch
+            {
                 emit_log(format!(
                     "  [CACHE] Reusing cached sync parameters from scratch for [{}]: offset={:+.3}s | conf={:.1}% | method={}",
                     name,
@@ -770,6 +994,17 @@ pub fn process_explicit_inputs(
                     .as_ref()
                     .map(|p| p.points.clone())
                     .unwrap_or_default();
+                tracker.skip_weight(2.0);
+                let _ = tx.send(PipelineEvent::TrackProgress {
+                    track_index: t_idx,
+                    fraction: if no_render { 1.0 } else { 0.55 },
+                    done: no_render,
+                    note: format!(
+                        "Cached match ({:+.3}s, {:.0}%)",
+                        c_entry.offset,
+                        c_entry.confidence * 100.0
+                    ),
+                });
                 ad_results.push(TrackSyncResult {
                     name: name.clone(),
                     source_path: ad_path.clone(),
@@ -794,11 +1029,14 @@ pub fn process_explicit_inputs(
 
         // Lazy decode Reference 8kHz mono WAV once
         if base_8k_samples.is_none() {
-            let _ = tx.send(PipelineEvent::Progress {
-                step_label: "Pre-decoding Reference 8kHz analysis audio...".to_string(),
-                completed: 0,
-                total: 100,
-            });
+            ref_weight_consumed = true;
+            tracker.begin_task(
+                0,
+                "Step 1 of 4 -- Reading Movie Audio",
+                1.0,
+                "Extracting reference audio from movie...",
+                1000,
+            );
             emit_log(format!(
                 "  [REF] Pre-decoding stream to 8kHz mono analysis WAV: {}...",
                 ref_path.file_name().and_then(|s| s.to_str()).unwrap_or("")
@@ -810,78 +1048,178 @@ pub fn process_explicit_inputs(
                 "REF",
                 8000,
                 Some(&ref_stream_map),
-                false,
+                None,
                 ref_sr,
                 config.threads,
+                Some(target_duration),
+                cancel_flag,
+                |f| tracker.update_frac("Extracting reference audio from movie...", f),
             )?;
             let (samples, _) = read_wav_mono_f32(&ref_wav)?;
             base_8k_samples = Some(samples);
+            tracker.finish_task();
         }
         let ref_samples = base_8k_samples.as_ref().unwrap();
 
-        let lname = name.to_ascii_lowercase();
-        let mut is_pal_track = match config.pal_mode {
-            PalMode::ForcePal => true,
-            PalMode::ForceNative => false,
-            PalMode::AutoDetect => {
-                lname.contains("uk") || lname.contains("pal") || lname.contains("25fps")
-            }
-        };
+        const PAL_TO_NTSC_STRETCH: f64 = 25.0 / 23.976023976;
+        let mut is_pal_track = false;
         let mut detected_stretch: Option<f64> = None;
         let mut baseline_fp = None;
 
-        // Automatic Acoustic Landmark Speed / PAL Probing
-        if !is_pal_track
-            && config.pal_mode == PalMode::AutoDetect
-            && config.speed_detect
-        {
-            let _ = tx.send(PipelineEvent::Progress {
-                step_label: format!("[{}] Probing acoustic landmarks for PAL speed shift...", name),
-                completed: 10,
-                total: 100,
-            });
-            let probe_wav = predecode_to_mono_wav(
-                &tools.ffmpeg,
-                ad_path,
-                &scratch_dir,
-                &format!("{}_rawprobe", name),
-                8000,
-                None,
-                false,
-                ad_sr,
-                config.threads,
-            )?;
-            let (probe_samples, _) = read_wav_mono_f32(&probe_wav)?;
-            let (det_pal, ratio, matches, fp_res) =
-                detect_speed_pal(ref_samples, &probe_samples, 8000);
-            baseline_fp = Some(fp_res);
-            if det_pal {
-                emit_log(format!(
-                    "  [SPEED PROBE] Acoustic landmark probe detected PAL speed transfer (stretch x{:.4}, {} matches) for [{}]!",
-                    ratio, matches, name
-                ));
-                is_pal_track = true;
-                detected_stretch = Some(ratio);
-            }
-        }
+        tracker.begin_task(
+            1,
+            format!("Step 2 of 4 -- Checking Speed & PAL [{}]", name),
+            0.5,
+            format!("[{}] Decoding audio & checking playback speed...", name),
+            1000,
+        );
+        let _ = tx.send(PipelineEvent::TrackProgress {
+            track_index: t_idx,
+            fraction: 0.08,
+            done: false,
+            note: "Decoding & checking speed / PAL...".to_string(),
+        });
 
-        // Decode 8kHz mono AD analysis WAV (with PAL clock correction if PAL)
-        emit_log(format!(
-            "\nAnalyzing acoustic correlation for [{}] (PAL={} @ {} Hz)...",
-            name, is_pal_track, ad_sr
-        ));
-        let ad_8k_wav = predecode_to_mono_wav(
-            &tools.ffmpeg,
-            ad_path,
-            &scratch_dir,
-            name,
-            8000,
-            None,
-            is_pal_track,
-            ad_sr,
-            config.threads,
-        )?;
-        let (ad_samples, _) = read_wav_mono_f32(&ad_8k_wav)?;
+        // Decode 8kHz mono AD analysis WAV & probe acoustic landmarks for genuine speed/PAL transfers.
+        // Never blindly force PAL slowdown from region tags like "[UK]" -- UK digital/Blu-ray AD tracks
+        // are frequently native 23.976fps and forcing a 4.27% slowdown destroys alignment.
+        let ad_samples: Vec<f32> = match config.pal_mode {
+            PalMode::ForcePal => {
+                is_pal_track = true;
+                detected_stretch = Some(PAL_TO_NTSC_STRETCH);
+                emit_log(format!(
+                    "\nAnalyzing acoustic correlation for [{}] (Forced PAL 25->23.976fps @ {} Hz)...",
+                    name, ad_sr
+                ));
+                let ad_8k_wav = predecode_to_mono_wav(
+                    &tools.ffmpeg,
+                    ad_path,
+                    &scratch_dir,
+                    name,
+                    8000,
+                    None,
+                    detected_stretch,
+                    ad_sr,
+                    config.threads,
+                    Some(ad_dur),
+                    cancel_flag,
+                    |f| {
+                        tracker.update_frac(
+                            format!("[{}] Decoding with PAL slowdown...", name),
+                            f,
+                        )
+                    },
+                )?;
+                let (s, _) = read_wav_mono_f32(&ad_8k_wav)?;
+                s
+            }
+            PalMode::ForceNative => {
+                emit_log(format!(
+                    "\nAnalyzing acoustic correlation for [{}] (Native 1.0x @ {} Hz)...",
+                    name, ad_sr
+                ));
+                let ad_8k_wav = predecode_to_mono_wav(
+                    &tools.ffmpeg,
+                    ad_path,
+                    &scratch_dir,
+                    name,
+                    8000,
+                    None,
+                    None,
+                    ad_sr,
+                    config.threads,
+                    Some(ad_dur),
+                    cancel_flag,
+                    |f| tracker.update_frac(format!("[{}] Decoding audio track...", name), f),
+                )?;
+                let (s, _) = read_wav_mono_f32(&ad_8k_wav)?;
+                s
+            }
+            PalMode::AutoDetect => {
+                // Decode once at native 1.0x first (reused directly when native 1.0x is confirmed!)
+                let native_wav = predecode_to_mono_wav(
+                    &tools.ffmpeg,
+                    ad_path,
+                    &scratch_dir,
+                    name,
+                    8000,
+                    None,
+                    None,
+                    ad_sr,
+                    config.threads,
+                    Some(ad_dur),
+                    cancel_flag,
+                    |f| {
+                        tracker.update_frac(
+                            format!("[{}] Decoding audio track...", name),
+                            f * 0.5,
+                        )
+                    },
+                )?;
+                let (native_samples, _) = read_wav_mono_f32(&native_wav)?;
+
+                if config.speed_detect {
+                    if cancel_flag.load(Ordering::Relaxed) {
+                        return Err("Cancelled".to_string());
+                    }
+                    tracker.update_frac(
+                        format!("[{}] Probing acoustic landmarks for PAL speed shift...", name),
+                        0.6,
+                    );
+                    let (det_pal, ratio, matches, fp_res) =
+                        detect_speed_pal(ref_samples, &native_samples, 8000);
+                    baseline_fp = Some(fp_res);
+                    if det_pal {
+                        emit_log(format!(
+                            "  [SPEED PROBE] Acoustic landmark probe detected speed transfer (stretch x{:.5}, {} matches) for [{}]!",
+                            ratio, matches, name
+                        ));
+                        is_pal_track = true;
+                        detected_stretch = Some(ratio);
+                    } else if matches > 0 {
+                        emit_log(format!(
+                            "  [SPEED PROBE] Confirmed native 1.0x speed for [{}] ({} landmark matches).",
+                            name, matches
+                        ));
+                    }
+                }
+
+                if let Some(stretch) = detected_stretch {
+                    emit_log(format!(
+                        "\nAnalyzing acoustic correlation for [{}] (Speed x{:.5} @ {} Hz)...",
+                        name, stretch, ad_sr
+                    ));
+                    let ad_8k_wav = predecode_to_mono_wav(
+                        &tools.ffmpeg,
+                        ad_path,
+                        &scratch_dir,
+                        name,
+                        8000,
+                        None,
+                        Some(stretch),
+                        ad_sr,
+                        config.threads,
+                        Some(ad_dur * stretch),
+                        cancel_flag,
+                        |f| {
+                            tracker.update_frac(
+                                format!("[{}] Re-decoding at corrected speed...", name),
+                                0.65 + f * 0.35,
+                            )
+                        },
+                    )?;
+                    let (s, _) = read_wav_mono_f32(&ad_8k_wav)?;
+                    s
+                } else {
+                    emit_log(format!(
+                        "\nAnalyzing acoustic correlation for [{}] (Native 1.0x @ {} Hz)...",
+                        name, ad_sr
+                    ));
+                    native_samples
+                }
+            }
+        };
+        tracker.finish_task();
 
         let mut method = "cross_correlation".to_string();
         let mut winner_offset = 0.0_f64;
@@ -890,6 +1228,14 @@ pub fn process_explicit_inputs(
         let mut measurements = Vec::new();
         let mut candidates = Vec::new();
 
+        tracker.begin_task(
+            2,
+            format!("Step 3 of 4 -- Aligning Audio Track [{}]", name),
+            1.5,
+            format!("[{}] Matching audio across movie timeline...", name),
+            config.anchors.max(1),
+        );
+
         if config.sync_mode == SyncMode::ForceWarp {
             emit_log(format!(
                 "  [{}] Forced Viterbi+PCHIP Warp mode enabled (bypassing 100-anchor global offset search).",
@@ -897,6 +1243,7 @@ pub fn process_explicit_inputs(
             ));
             method = "warp".to_string();
         } else {
+            let align_tracker = &tracker;
             measurements = evaluate_anchor_correlations(
                 ref_samples,
                 &ad_samples,
@@ -904,17 +1251,29 @@ pub fn process_explicit_inputs(
                 target_duration,
                 config.anchors,
                 config.multiband,
+                cancel_flag,
                 |done, tot, _| {
-                    let _ = tx.send(PipelineEvent::Progress {
-                        step_label: format!(
-                            "[{}] Evaluating 3-Band FFT Correlation Anchors ({}/{})",
-                            name, done, tot
+                    let tot_safe = tot.max(1);
+                    align_tracker.update_task(
+                        format!(
+                            "[{}] Matching audio across {} timeline spots ({}/{})",
+                            name, tot_safe, done, tot_safe
                         ),
-                        completed: done,
-                        total: tot.max(1),
+                        done,
+                        tot_safe,
+                    );
+                    let frac = 0.20 + 0.35 * ((done as f32) / (tot_safe as f32));
+                    let _ = tx.send(PipelineEvent::TrackProgress {
+                        track_index: t_idx,
+                        fraction: frac,
+                        done: false,
+                        note: format!("Checking alignment spot {} of {}...", done, tot_safe),
                     });
                 },
             );
+            if cancel_flag.load(Ordering::Relaxed) {
+                return Err("Cancelled".to_string());
+            }
 
             candidates = find_offset_candidates(&measurements, config.min_confidence, 0.03);
             let top = candidates[0];
@@ -1004,34 +1363,92 @@ pub fn process_explicit_inputs(
 
         let mut warp_plan: Option<WarpPlan> = None;
         if method == "warp" {
-            let _ = tx.send(PipelineEvent::Progress {
-                step_label: format!("[{}] Building Landmark Fingerprint & Candidate Lattice...", name),
-                completed: 0,
-                total: 100,
-            });
+            tracker.update_frac(
+                format!("[{}] Mapping acoustic landmarks for Time-Warp...", name),
+                0.05,
+            );
             let fp = if is_pal_track || baseline_fp.is_none() {
                 fingerprint_align(ref_samples, &ad_samples, 8000)
             } else {
                 baseline_fp.unwrap()
             };
+            if cancel_flag.load(Ordering::Relaxed) {
+                return Err("Cancelled".to_string());
+            }
 
+            let eff_ad_dur = (ad_samples.len() as f64) / 8000.0;
+
+            // Compute initial offset hint in ADSync convention (t_vid - t_ad).
+            // Note: correlation.rs returns (t_ad - t_vid), so we negate it when seeding warp!
+            let warp_offset_hint = if fp.is_strong() && !fp.spans.is_empty() {
+                let mut span_offs: Vec<(f64, usize)> = fp
+                    .spans
+                    .iter()
+                    .map(|s| (s.offset, s.matches.max(1)))
+                    .collect();
+                span_offs.sort_by(|a, b| {
+                    a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let total_m: usize = span_offs.iter().map(|s| s.1).sum();
+                let mut acc = 0usize;
+                let mut med = span_offs[span_offs.len() / 2].0;
+                for (o, m) in span_offs {
+                    acc += m;
+                    if acc * 2 >= total_m {
+                        med = o;
+                        break;
+                    }
+                }
+                med
+            } else if config.sync_mode == SyncMode::ForceWarp {
+                // Quick 16-anchor correlation probe so ForceWarp does not blindly assume 0.0
+                let probe_meas = evaluate_anchor_correlations(
+                    ref_samples,
+                    &ad_samples,
+                    8000,
+                    target_duration,
+                    16,
+                    config.multiband,
+                    cancel_flag,
+                    |_, _, _| {},
+                );
+                if cancel_flag.load(Ordering::Relaxed) {
+                    return Err("Cancelled".to_string());
+                }
+                let probe_cands = find_offset_candidates(&probe_meas, config.min_confidence, 0.05);
+                let ptop = probe_cands[0];
+                if ptop.max_peak >= config.min_confidence {
+                    -ptop.median_offset
+                } else {
+                    0.0
+                }
+            } else if winner_peak >= config.min_confidence {
+                -winner_offset
+            } else {
+                0.0
+            };
+
+            let dur_gap = (target_duration - eff_ad_dur).abs();
             let search_radius = if fp.is_strong() && fp.spans.len() >= 2 {
                 let mut max_jump = 0.0_f64;
                 for pair in fp.spans.windows(2) {
                     max_jump = max_jump.max((pair[1].offset - pair[0].offset).abs());
                 }
                 (max_jump + 15.0).clamp(30.0, 90.0)
+            } else if fp.is_strong() {
+                (dur_gap + 30.0).clamp(30.0, 90.0)
             } else {
-                let dur_gap = (target_duration - ad_dur).abs();
                 (dur_gap + 45.0).clamp(30.0, 180.0)
             };
 
             emit_log(format!(
-                "  [WARP] Building candidate lattice (search radius +/-{:.0}s, {} fingerprint spans)...",
+                "  [WARP] Building candidate lattice (search radius +/-{:.0}s, hint {:+.3}s, {} fingerprint span(s))...",
                 search_radius,
+                -warp_offset_hint,
                 fp.spans.len()
             ));
 
+            let warp_tracker = &tracker;
             let lattice = build_candidate_lattice(
                 ref_samples,
                 &ad_samples,
@@ -1039,24 +1456,32 @@ pub fn process_explicit_inputs(
                 8.0,
                 2.0,
                 search_radius,
-                winner_offset,
+                warp_offset_hint,
                 Some(&fp),
                 5,
                 config.multiband,
+                cancel_flag,
                 |done, tot| {
-                    let _ = tx.send(PipelineEvent::Progress {
-                        step_label: format!(
-                            "[{}] Scanning Candidate Lattice ({}/{})",
-                            name, done, tot
-                        ),
-                        completed: done,
-                        total: tot.max(1),
+                    let tot_safe = tot.max(1);
+                    warp_tracker.update_task(
+                        format!("[{}] Scanning Time-Warp lattice ({}/{})", name, done, tot_safe),
+                        done,
+                        tot_safe,
+                    );
+                    let frac = 0.25 + 0.30 * ((done as f32) / (tot_safe as f32));
+                    let _ = tx.send(PipelineEvent::TrackProgress {
+                        track_index: t_idx,
+                        fraction: frac,
+                        done: false,
+                        note: format!("Time-Warp lattice {}/{} windows...", done, tot_safe),
                     });
                 },
             );
+            if cancel_flag.load(Ordering::Relaxed) {
+                return Err("Cancelled".to_string());
+            }
 
-            let (raw_pts, _cost) = decode_warp_path(&lattice, winner_offset, Some(&fp));
-            let eff_ad_dur = (ad_samples.len() as f64) / 8000.0;
+            let (raw_pts, _cost) = decode_warp_path(&lattice, warp_offset_hint, Some(&fp));
             let plan = fit_and_refine_warp(
                 raw_pts,
                 eff_ad_dur,
@@ -1066,16 +1491,34 @@ pub fn process_explicit_inputs(
                 config.discontinuity_threshold,
                 0.60,
             );
-            winner_offset = plan.global_offset;
+            // Report global offset in unified (t_ad - t_vid) convention matching cross-correlation
+            winner_offset = -plan.global_offset;
             winner_peak = plan.confidence;
             emit_log(format!(
-                "  [WARP] Fitted {} continuous PCHIP segment(s) across {} warp points (Mean Confidence: {:.1}%)",
+                "  [WARP] Fitted {} continuous PCHIP segment(s) across {} warp points | Median Offset: {:+.3}s | Cuts: {} | Gaps: {} | Mean Confidence: {:.1}%",
                 plan.splines.len(),
                 plan.points.len(),
+                winner_offset,
+                plan.cuts.len(),
+                plan.explicit_gaps.len(),
                 plan.confidence * 100.0
             ));
             warp_plan = Some(plan);
         }
+        tracker.finish_task();
+
+        let _ = tx.send(PipelineEvent::TrackProgress {
+            track_index: t_idx,
+            fraction: if no_render { 1.0 } else { 0.55 },
+            done: no_render,
+            note: format!(
+                "Matched {:+.3}s ({:.0}%{}, {})",
+                winner_offset,
+                winner_peak * 100.0,
+                if is_pal_track { ", PAL fixed" } else { ", Normal 1.0x" },
+                if method == "warp" { "Time-Warp" } else { "Single Offset" }
+            ),
+        });
 
         cached_map.insert(
             name.clone(),
@@ -1121,6 +1564,9 @@ pub fn process_explicit_inputs(
 
     // Free 8kHz reference buffer before HQ 48kHz rendering
     drop(base_8k_samples);
+    if !ref_weight_consumed && !ad_inputs.is_empty() {
+        tracker.skip_weight(1.0);
+    }
 
     // Save sync_params.json cache
     if let Ok(json_str) = serde_json::to_string_pretty(&cached_map) {
@@ -1143,10 +1589,12 @@ pub fn process_explicit_inputs(
                 &out_dir,
                 &scratch_dir,
                 channels,
+                render_duration,
                 Some(&ref_stream_map),
                 config,
+                cancel_flag,
                 &mut emit_log,
-                tx,
+                &mut tracker,
             )?;
             main_deliverables = rendered_main;
         }
@@ -1155,7 +1603,7 @@ pub fn process_explicit_inputs(
         if !ad_results.is_empty() {
             emit_log("\n=== RENDERING AUDIO DESCRIPTION TRACKS ===".to_string());
             let total_ads = ad_results.len();
-            for res in &mut ad_results {
+            for (t_idx, res) in ad_results.iter_mut().enumerate() {
                 if cancel_flag.load(Ordering::Relaxed) {
                     return Err("Cancelled".to_string());
                 }
@@ -1168,6 +1616,7 @@ pub fn process_explicit_inputs(
                     ref_path,
                     &base_title,
                     res,
+                    t_idx,
                     plan_opt,
                     total_ads,
                     target_duration,
@@ -1177,8 +1626,9 @@ pub fn process_explicit_inputs(
                     Some(&ref_stream_map),
                     mux_video_path,
                     config,
+                    cancel_flag,
                     &mut emit_log,
-                    tx,
+                    &mut tracker,
                 )?;
             }
         }
@@ -1224,11 +1674,28 @@ pub fn process_explicit_inputs(
                         "  [SKIP] Final MKV already exists: {}",
                         target_mkv.display()
                     ));
+                    tracker.skip_weight(1.0);
                     final_mkv_out = Some(target_mkv);
                 } else if let Some(ref mkvmerge_bin) = tools.mkvmerge {
                     emit_log("\n=== MULTIPLEXING FINAL MKV ===".to_string());
                     emit_log(format!("  Output: {}", target_mkv.display()));
-                    mux_final_mkv(mkvmerge_bin, ref_path, &main_stereo, &ad_stereos, &target_mkv)?;
+                    tracker.begin_task(
+                        3,
+                        "Step 4 of 4 -- Building Final MKV",
+                        1.0,
+                        "Merging video & synced audio into final MKV...",
+                        1000,
+                    );
+                    mux_final_mkv(
+                        mkvmerge_bin,
+                        ref_path,
+                        &main_stereo,
+                        &ad_stereos,
+                        &target_mkv,
+                        cancel_flag,
+                        |f| tracker.update_frac("Merging video & synced audio into final MKV...", f),
+                    )?;
+                    tracker.finish_task();
                     let sz_mb = (fs::metadata(&target_mkv).map(|m| m.len()).unwrap_or(0) as f64)
                         / (1024.0 * 1024.0);
                     emit_log(format!(
@@ -1340,8 +1807,32 @@ pub fn process_explicit_inputs(
     }
     emit_log("================================================================================\n".to_string());
 
-    let log_text = log_lines.join("\n");
-    maybe_save_log_file(config, &project_dir, &base_title, &log_text);
+    let method_tag = if ad_results.is_empty() {
+        "main"
+    } else if ad_results.iter().all(|r| r.method == "warp") {
+        "warp"
+    } else if ad_results.iter().all(|r| r.method == "cross_correlation") {
+        "corr"
+    } else {
+        "sync"
+    };
+    let mut log_text = log_lines.join("\n");
+    let saved_log_path = maybe_save_log_file(
+        config,
+        ref_path,
+        &project_dir,
+        &out_dir,
+        &base_title,
+        ad_results.len(),
+        method_tag,
+        &log_text,
+    );
+    if let Some(ref saved_log) = saved_log_path {
+        let line = format!("  [LOG] Saved session log: {}", saved_log.display());
+        let _ = tx.send(PipelineEvent::LogLine(line.clone()));
+        log_text.push('\n');
+        log_text.push_str(&line);
+    }
 
     Ok(MovieJobReport {
         base_title,
@@ -1356,36 +1847,40 @@ pub fn process_explicit_inputs(
         main_deliverables,
         ad_results,
         final_mkv: final_mkv_out,
+        saved_log_path,
         elapsed_secs: job_start.elapsed().as_secs_f64(),
         skipped: false,
         log_text,
     })
 }
 
-fn maybe_save_log_file(config: &AppConfig, project_dir: &Path, base_title: &str, log_text: &str) {
+#[allow(clippy::too_many_arguments)]
+fn maybe_save_log_file(
+    config: &AppConfig,
+    ref_path: &Path,
+    project_dir: &Path,
+    out_dir: &Path,
+    base_title: &str,
+    track_count: usize,
+    method_tag: &str,
+    log_text: &str,
+) -> Option<PathBuf> {
     if !config.log_to_file {
-        return;
+        return None;
     }
-    let log_dir = if !config.log_dir.trim().is_empty() {
-        PathBuf::from(config.log_dir.trim())
-    } else {
-        project_dir.to_path_buf()
-    };
+    let log_dir = config.resolve_log_dir(ref_path, project_dir, out_dir, base_title);
     let _ = fs::create_dir_all(&log_dir);
-    let clean_title: String = base_title
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .take(35)
-        .collect();
-    let ts = Local::now().format("%Y%m%d_%H%M%S");
-    let filename = format!("{}_{}.log", ts, clean_title.trim_matches('_'));
-    let _ = fs::write(log_dir.join(filename), log_text);
+    let mkv_stem = ref_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(base_title);
+    let filename = config.format_log_filename(base_title, mkv_stem, track_count, method_tag);
+    let full_path = log_dir.join(filename);
+    if fs::write(&full_path, log_text).is_ok() {
+        Some(full_path)
+    } else {
+        None
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1396,10 +1891,12 @@ fn render_main_tracks<F>(
     out_dir: &Path,
     scratch_dir: &Path,
     channels: u32,
+    render_duration: f64,
     stream_map: Option<&str>,
     config: &AppConfig,
+    cancel_flag: &AtomicBool,
     emit_log: &mut F,
-    tx: &Sender<PipelineEvent>,
+    tracker: &mut OverallTracker<'_>,
 ) -> Result<Vec<PathBuf>, String>
 where
     F: FnMut(String),
@@ -1412,6 +1909,8 @@ where
     };
 
     let mut saved = Vec::new();
+    let main_w_remaining = 2.0_f64;
+    let mut main_w_used = 0.0_f64;
 
     // 1. Surround 5.1 AC3 (if 6+ channels and not stereo_only)
     if channels >= 6 && !config.stereo_only {
@@ -1425,12 +1924,11 @@ where
                 out_surround.file_name().and_then(|s| s.to_str()).unwrap_or("")
             ));
             saved.push(out_surround);
+            tracker.skip_weight(0.5);
+            main_w_used += 0.5;
         } else {
-            let _ = tx.send(PipelineEvent::Progress {
-                step_label: "Encoding Main 5.1 Surround AC3 (640k)...".to_string(),
-                completed: 25,
-                total: 100,
-            });
+            let lbl = "Encoding Main 5.1 Surround AC3 (640k)...";
+            tracker.begin_task(3, "Step 4 of 4 -- Encoding Movie Audio", 0.5, lbl, 1000);
             emit_log("  [1/3] Encoding 5.1 Surround AC3 (640k)...".to_string());
             let mut cmd = Command::new(ffmpeg_bin);
             apply_no_window(&mut cmd);
@@ -1451,20 +1949,35 @@ where
             if let Some(psec) = config.preview_sec {
                 cmd.args(["-t", &format!("{:.3}", psec)]);
             }
-            cmd.args(["-c:a", "ac3", "-b:a", "640k", "-ar", "48000"])
-                .arg(&out_surround)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
+            cmd.args([
+                "-c:a",
+                "ac3",
+                "-b:a",
+                "640k",
+                "-ar",
+                "48000",
+                "-progress",
+                "pipe:1",
+                "-nostats",
+            ])
+            .arg(&out_surround);
 
-            let res = cmd.output().map_err(|e| e.to_string())?;
-            if res.status.success() {
+            let (status, _stdout, stderr) = run_cancellable_command(
+                &mut cmd,
+                cancel_flag,
+                Some(render_duration),
+                Some(&out_surround),
+                |f| tracker.update_frac(lbl, f),
+            )?;
+            tracker.finish_task();
+            main_w_used += 0.5;
+            if status.success() {
                 emit_log(format!("  [SUCCESS] Saved: {}", out_surround.display()));
                 saved.push(out_surround);
             } else {
                 emit_log(format!(
                     "  [ERROR] Surround AC3 failed: {}",
-                    String::from_utf8_lossy(&res.stderr).trim()
+                    String::from_utf8_lossy(&stderr).trim()
                 ));
             }
         }
@@ -1494,11 +2007,18 @@ where
         if config.generate_night_mode {
             saved.push(out_night);
         }
+        tracker.skip_weight((main_w_remaining - main_w_used).max(0.0));
         return Ok(saved);
     }
 
     // 2. Extract intermediate stereo WAV in scratch (ITU-R BS.775 downmix)
+    let rem_w = (main_w_remaining - main_w_used).max(0.3);
+    let sub_steps = 2.0 + if config.generate_night_mode { 1.0 } else { 0.0 };
+    let each_w = rem_w / sub_steps;
+
     let stereo_wav = scratch_dir.join("main_stereo_temp.wav");
+    let wav_lbl = "Downmixing Movie Audio to True 2.0 Stereo WAV...";
+    tracker.begin_task(3, "Step 4 of 4 -- Encoding Movie Audio", each_w, wav_lbl, 1000);
     emit_log("  Extracting intermediate True 2.0 Stereo WAV (ITU-R BS.775 downmix)...".to_string());
     let af_str = if channels >= 6 {
         format!("asetpts=PTS-STARTPTS,{},aresample=48000", PAN_STEREO_BS775)
@@ -1540,17 +2060,24 @@ where
             "auto",
             "-f",
             "wav",
+            "-progress",
+            "pipe:1",
+            "-nostats",
         ])
-        .arg(&stereo_wav)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .arg(&stereo_wav);
 
-    let res_wav = cmd_wav.output().map_err(|e| e.to_string())?;
-    if !res_wav.status.success() {
+    let (status_wav, _stdout, stderr_wav) = run_cancellable_command(
+        &mut cmd_wav,
+        cancel_flag,
+        Some(render_duration),
+        Some(&stereo_wav),
+        |f| tracker.update_frac(wav_lbl, f),
+    )?;
+    tracker.finish_task();
+    if !status_wav.success() {
         return Err(format!(
             "Error extracting intermediate stereo WAV: {}",
-            String::from_utf8_lossy(&res_wav.stderr).trim()
+            String::from_utf8_lossy(&stderr_wav).trim()
         ));
     }
 
@@ -1561,12 +2088,10 @@ where
             codec_label
         ));
         saved.push(out_stereo);
+        tracker.skip_weight(each_w);
     } else {
-        let _ = tx.send(PipelineEvent::Progress {
-            step_label: format!("Encoding Main Stereo {} (alimiter)...", codec_label),
-            completed: 55,
-            total: 100,
-        });
+        let lbl = format!("Encoding Main Stereo {} (alimiter)...", codec_label);
+        tracker.begin_task(3, "Step 4 of 4 -- Encoding Movie Audio", each_w, &lbl, 1000);
         emit_log(format!(
             "  Encoding Main Stereo {} (alimiter, full dynamic range)...",
             codec_label
@@ -1578,7 +2103,11 @@ where
             "alimiter=level_in=1:level_out=0.98:limit=0.98",
             config.wav_output,
             config.threads,
+            render_duration,
+            cancel_flag,
+            |f| tracker.update_frac(&lbl, f),
         )?;
+        tracker.finish_task();
         emit_log(format!("  [SUCCESS] Saved: {}", out_stereo.display()));
         saved.push(out_stereo);
     }
@@ -1591,15 +2120,13 @@ where
                 codec_label
             ));
             saved.push(out_night);
+            tracker.skip_weight(each_w);
         } else {
-            let _ = tx.send(PipelineEvent::Progress {
-                step_label: format!(
-                    "Encoding Main Night Mode {} (loudnorm {:.1} LUFS)...",
-                    codec_label, config.target_i
-                ),
-                completed: 80,
-                total: 100,
-            });
+            let lbl = format!(
+                "Encoding Main Night Mode {} (loudnorm {:.1} LUFS)...",
+                codec_label, config.target_i
+            );
+            tracker.begin_task(3, "Step 4 of 4 -- Encoding Movie Audio", each_w, &lbl, 1000);
             emit_log(format!(
                 "  Encoding Main Night Mode {} (loudnorm {:.1} LUFS)...",
                 codec_label, config.target_i
@@ -1615,7 +2142,11 @@ where
                 &ln_filter,
                 config.wav_output,
                 config.threads,
+                render_duration,
+                cancel_flag,
+                |f| tracker.update_frac(&lbl, f),
             )?;
+            tracker.finish_task();
             emit_log(format!("  [SUCCESS] Saved: {}", out_night.display()));
             saved.push(out_night);
         }
@@ -1635,6 +2166,7 @@ fn render_single_ad_track<F>(
     ref_path: &Path,
     base_title: &str,
     res: &mut TrackSyncResult,
+    track_index: usize,
     warp_plan: Option<&WarpPlan>,
     total_ad_count: usize,
     target_duration: f64,
@@ -1644,8 +2176,9 @@ fn render_single_ad_track<F>(
     ref_stream_map: Option<&str>,
     mux_video_path: Option<&Path>,
     config: &AppConfig,
+    cancel_flag: &AtomicBool,
     emit_log: &mut F,
-    tx: &Sender<PipelineEvent>,
+    tracker: &mut OverallTracker<'_>,
 ) -> Result<(), String>
 where
     F: FnMut(String),
@@ -1689,12 +2222,23 @@ where
         if config.generate_night_mode {
             res.deliverables.push(out_night);
         }
+        tracker.skip_weight(2.0);
+        let _ = tracker.tx.send(PipelineEvent::TrackProgress {
+            track_index,
+            fraction: 1.0,
+            done: true,
+            note: "Output files already exist (skipped)".to_string(),
+        });
         return Ok(());
     }
 
     let ad_info = get_audio_info(ffprobe_bin, &res.source_path, "a:0")?;
     let ad_sr = ad_info.sample_rate;
     let temp_wav = scratch_dir.join(format!("{}_synced_temp.wav", res.name));
+    let ov_lbl = format!("Step 4 of 4 -- Encoding Audio Track [{}]", res.name);
+
+    let encode_w = if config.generate_night_mode { 0.6 } else { 1.2 };
+    let prep_w = 0.8;
 
     if res.method == "warp" {
         if let Some(plan) = warp_plan {
@@ -1702,18 +2246,29 @@ where
                 "\n--- [WARP MODE: Native Rust Viterbi+PCHIP] Rendering [{}] ---",
                 res.name
             ));
-            let _ = tx.send(PipelineEvent::Progress {
-                step_label: format!("[{}] Decoding 48kHz HQ source audio...", res.name),
-                completed: 30,
-                total: 100,
+            let hq_lbl = format!("[{}] Decoding 48kHz HQ source audio...", res.name);
+            tracker.begin_task(3, &ov_lbl, prep_w * 0.4, &hq_lbl, 1000);
+            let _ = tracker.tx.send(PipelineEvent::TrackProgress {
+                track_index,
+                fraction: 0.58,
+                done: false,
+                note: "Decoding HQ source audio for Time-Warp...".to_string(),
             });
 
-            // 1. Decode HQ 48kHz stereo AD WAV (applying exact PAL sample-rate slowdown if PAL)
+            // 1. Decode HQ 48kHz stereo AD WAV (applying exact speed/PAL sample-rate clock scaling if needed)
             let hq_src_wav = scratch_dir.join(format!("{}_hq_src_48k.wav", res.name));
             let mut filters = vec!["asetpts=PTS-STARTPTS".to_string()];
-            if res.is_pal {
-                let pal_rate = (ad_sr as f64) * (23.976023976 / 25.0);
-                filters.push(format!("asetrate={:.8}", pal_rate));
+            let active_stretch = res
+                .speed_stretch
+                .or(if res.is_pal {
+                    Some(25.0 / 23.976023976)
+                } else {
+                    None
+                })
+                .filter(|&s| s.is_finite() && s > 0.5 && s < 2.0 && (s - 1.0).abs() > 1e-5);
+            if let Some(stretch) = active_stretch {
+                let target_clock = (ad_sr as f64) / stretch;
+                filters.push(format!("asetrate={:.8}", target_clock));
             }
             filters.push("aresample=48000".to_string());
 
@@ -1745,48 +2300,61 @@ where
                     "auto",
                     "-f",
                     "wav",
+                    "-progress",
+                    "pipe:1",
+                    "-nostats",
                 ])
-                .arg(&hq_src_wav)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
+                .arg(&hq_src_wav);
 
-            let out_hq = cmd_hq.output().map_err(|e| e.to_string())?;
-            if !out_hq.status.success() {
+            let (st_hq, _stdout, stderr_hq) = run_cancellable_command(
+                &mut cmd_hq,
+                cancel_flag,
+                Some(render_duration),
+                Some(&hq_src_wav),
+                |f| tracker.update_frac(&hq_lbl, f),
+            )?;
+            tracker.finish_task();
+            if !st_hq.success() {
                 return Err(format!(
                     "Failed decoding HQ AD WAV: {}",
-                    String::from_utf8_lossy(&out_hq.stderr).trim()
+                    String::from_utf8_lossy(&stderr_hq).trim()
                 ));
             }
 
             // 2. Render warped 48kHz stereo WAV in streaming 30-second blocks (< 35 MB RAM!)
-            let _ = tx.send(PipelineEvent::Progress {
-                step_label: format!("[{}] Streaming Catmull-Rom PCHIP Warp Render...", res.name),
-                completed: 50,
-                total: 100,
-            });
+            let warp_lbl = format!("[{}] Rendering continuous PCHIP Time-Warp audio...", res.name);
+            tracker.begin_task(3, &ov_lbl, prep_w * 0.6, &warp_lbl, 1000);
+            let tx_copy = tracker.tx.clone();
             render_warped_wav_streaming(
                 &hq_src_wav,
                 &temp_wav,
                 plan,
                 render_duration,
                 config.crossfade_ms,
+                cancel_flag,
+                |f| {
+                    tracker.update_frac(&warp_lbl, f);
+                    let _ = tx_copy.send(PipelineEvent::TrackProgress {
+                        track_index,
+                        fraction: 0.62 + 0.14 * (f as f32),
+                        done: false,
+                        note: format!("Rendering Time-Warp audio ({:.0}%)...", f * 100.0),
+                    });
+                },
             )?;
+            tracker.finish_task();
             if !config.keep_scratch {
                 let _ = fs::remove_file(&hq_src_wav);
             }
 
             // 3. Windowed Master Audio Gap Filling (only if explicit_gaps exist!)
             if config.gap_fill && !plan.explicit_gaps.is_empty() {
-                let _ = tx.send(PipelineEvent::Progress {
-                    step_label: format!(
-                        "[{}] Splicing Master Audio into {} excised scene gap(s)...",
-                        res.name,
-                        plan.explicit_gaps.len()
-                    ),
-                    completed: 65,
-                    total: 100,
-                });
+                let gap_lbl = format!(
+                    "[{}] Filling {} missing scene gap(s) with movie audio...",
+                    res.name,
+                    plan.explicit_gaps.len()
+                );
+                tracker.update_frac(&gap_lbl, 0.5);
                 let filled = fill_master_audio_gaps_windowed(
                     ffmpeg_bin,
                     &temp_wav,
@@ -1797,6 +2365,7 @@ where
                     config.threads,
                     &plan.explicit_gaps,
                     config.crossfade_ms,
+                    cancel_flag,
                 )?;
                 if !filled.is_empty() {
                     emit_log(format!(
@@ -1823,14 +2392,24 @@ where
         }
     } else {
         // Standard Cross-Correlation Single Offset Path
+        let wav_lbl = format!("[{}] Preparing synced audio WAV...", res.name);
+        tracker.begin_task(3, &ov_lbl, prep_w, &wav_lbl, 1000);
         emit_log(format!(
             "  Pre-rendering synced PCM WAV for [{}] (offset={:+.3}s)...",
             res.name, res.offset
         ));
         let mut wav_filters = vec!["asetpts=PTS-STARTPTS".to_string()];
-        if res.is_pal {
-            let pal_rate = (ad_sr as f64) * (23.976023976 / 25.0);
-            wav_filters.push(format!("asetrate={:.8}", pal_rate));
+        let active_stretch = res
+            .speed_stretch
+            .or(if res.is_pal {
+                Some(25.0 / 23.976023976)
+            } else {
+                None
+            })
+            .filter(|&s| s.is_finite() && s > 0.5 && s < 2.0 && (s - 1.0).abs() > 1e-5);
+        if let Some(stretch) = active_stretch {
+            let target_clock = (ad_sr as f64) / stretch;
+            wav_filters.push(format!("asetrate={:.8}", target_clock));
             wav_filters.push("aresample=48000".to_string());
         } else if (res.atempo - 1.0).abs() > 0.00001 {
             wav_filters.push(format!("atempo={:.8}", res.atempo));
@@ -1879,17 +2458,33 @@ where
                 "auto",
                 "-f",
                 "wav",
+                "-progress",
+                "pipe:1",
+                "-nostats",
             ])
-            .arg(&temp_wav)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .arg(&temp_wav);
 
-        let out_w = cmd_wav.output().map_err(|e| e.to_string())?;
-        if !out_w.status.success() {
+        let tx_copy = tracker.tx.clone();
+        let (st_w, _stdout, stderr_w) = run_cancellable_command(
+            &mut cmd_wav,
+            cancel_flag,
+            Some(render_duration),
+            Some(&temp_wav),
+            |f| {
+                tracker.update_frac(&wav_lbl, f);
+                let _ = tx_copy.send(PipelineEvent::TrackProgress {
+                    track_index,
+                    fraction: 0.56 + 0.16 * (f as f32),
+                    done: false,
+                    note: format!("Preparing synced audio ({:.0}%)...", f * 100.0),
+                });
+            },
+        )?;
+        tracker.finish_task();
+        if !st_w.success() {
             return Err(format!(
                 "Error pre-rendering AD WAV: {}",
-                String::from_utf8_lossy(&out_w.stderr).trim()
+                String::from_utf8_lossy(&stderr_w).trim()
             ));
         }
 
@@ -1920,6 +2515,7 @@ where
                     config.threads,
                     &single_gaps,
                     config.crossfade_ms,
+                    cancel_flag,
                 )?;
                 res.filled_gaps = filled;
             }
@@ -1927,15 +2523,14 @@ where
     }
 
     // Encode Standard Stereo deliverable from temp_wav
-    let _ = tx.send(PipelineEvent::Progress {
-        step_label: format!("[{}] Encoding Synced AD Stereo {}...", res.name, codec_name),
-        completed: 75,
-        total: 100,
-    });
+    let stereo_lbl = format!("[{}] Encoding Synced AD Stereo {}...", res.name, codec_name);
+    tracker.begin_task(3, &ov_lbl, encode_w, &stereo_lbl, 1000);
     emit_log(format!(
         "  Encoding Synced AD Stereo {} (alimiter)...",
         codec_name
     ));
+    let tx_copy = tracker.tx.clone();
+    let stereo_end_frac = if config.generate_night_mode { 0.86 } else { 0.99 };
     encode_deliverable_from_wav(
         ffmpeg_bin,
         &temp_wav,
@@ -1943,20 +2538,29 @@ where
         "alimiter=level_in=1:level_out=0.98:limit=0.98",
         config.wav_output,
         config.threads,
+        render_duration,
+        cancel_flag,
+        |f| {
+            tracker.update_frac(&stereo_lbl, f);
+            let _ = tx_copy.send(PipelineEvent::TrackProgress {
+                track_index,
+                fraction: 0.72 + (stereo_end_frac - 0.72) * (f as f32),
+                done: false,
+                note: format!("Encoding Stereo {} ({:.0}%)...", codec_name, f * 100.0),
+            });
+        },
     )?;
+    tracker.finish_task();
     emit_log(format!("  [SUCCESS] Saved: {}", out_stereo.display()));
     res.deliverables.push(out_stereo.clone());
 
     // Encode Night Mode deliverable from temp_wav
     if config.generate_night_mode {
-        let _ = tx.send(PipelineEvent::Progress {
-            step_label: format!(
-                "[{}] Encoding Synced AD Night Mode {} (loudnorm {:.1} LUFS)...",
-                res.name, codec_name, config.target_i
-            ),
-            completed: 90,
-            total: 100,
-        });
+        let night_lbl = format!(
+            "[{}] Encoding Synced AD Night Mode {} (loudnorm {:.1} LUFS)...",
+            res.name, codec_name, config.target_i
+        );
+        tracker.begin_task(3, &ov_lbl, encode_w, &night_lbl, 1000);
         emit_log(format!(
             "  Encoding Synced AD Night Mode {} (loudnorm {:.1} LUFS)...",
             codec_name, config.target_i
@@ -1965,6 +2569,7 @@ where
             "loudnorm=I={:.1}:TP={:.1}:LRA=11",
             config.target_i, config.target_tp
         );
+        let tx_copy2 = tracker.tx.clone();
         encode_deliverable_from_wav(
             ffmpeg_bin,
             &temp_wav,
@@ -1972,7 +2577,19 @@ where
             &ln_filter,
             config.wav_output,
             config.threads,
+            render_duration,
+            cancel_flag,
+            |f| {
+                tracker.update_frac(&night_lbl, f);
+                let _ = tx_copy2.send(PipelineEvent::TrackProgress {
+                    track_index,
+                    fraction: 0.86 + 0.13 * (f as f32),
+                    done: false,
+                    note: format!("Encoding Night Mode {} ({:.0}%)...", codec_name, f * 100.0),
+                });
+            },
         )?;
+        tracker.finish_task();
         emit_log(format!("  [SUCCESS] Saved: {}", out_night.display()));
         res.deliverables.push(out_night);
     }
@@ -1995,6 +2612,7 @@ where
                 &out_stereo,
                 &out_sample_mkv,
                 render_duration,
+                cancel_flag,
             )?;
             emit_log(format!(
                 "  [SUCCESS] Saved MKV Video Sample: {}",
@@ -2004,17 +2622,36 @@ where
         }
     }
 
+    let _ = tracker.tx.send(PipelineEvent::TrackProgress {
+        track_index,
+        fraction: 1.0,
+        done: true,
+        note: format!(
+            "Done -- {:+.3}s ({:.0}% match, {} file(s) saved)",
+            res.offset,
+            res.confidence * 100.0,
+            res.deliverables.len()
+        ),
+    });
+
     Ok(())
 }
 
-fn encode_deliverable_from_wav(
+#[allow(clippy::too_many_arguments)]
+fn encode_deliverable_from_wav<F>(
     ffmpeg_bin: &Path,
     in_wav: &Path,
     out_path: &Path,
     af_filter: &str,
     wav_output: bool,
     threads: usize,
-) -> Result<(), String> {
+    expected_duration_sec: f64,
+    cancel_flag: &AtomicBool,
+    on_progress: F,
+) -> Result<(), String>
+where
+    F: FnMut(f64),
+{
     let mut cmd = Command::new(ffmpeg_bin);
     apply_no_window(&mut cmd);
     cmd.args([
@@ -2035,17 +2672,20 @@ fn encode_deliverable_from_wav(
     } else {
         cmd.args(["-c:a", "aac", "-b:a", "256k"]);
     }
-    cmd.arg(out_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.args(["-progress", "pipe:1", "-nostats"]).arg(out_path);
 
-    let out = cmd.output().map_err(|e| e.to_string())?;
-    if !out.status.success() {
+    let (status, _stdout, stderr) = run_cancellable_command(
+        &mut cmd,
+        cancel_flag,
+        Some(expected_duration_sec),
+        Some(out_path),
+        on_progress,
+    )?;
+    if !status.success() {
         return Err(format!(
             "FFmpeg failed encoding '{}': {}",
             out_path.display(),
-            String::from_utf8_lossy(&out.stderr).trim()
+            String::from_utf8_lossy(&stderr).trim()
         ));
     }
     Ok(())

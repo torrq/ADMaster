@@ -194,40 +194,51 @@ jobs:
           generate_release_notes: false
           body: |
             ```text
-            ADMaster v2.0.0 Changelog
+            ADMaster v2.0.1 Changelog
             =========================
 
-            Pure-Rust Engine Rewrite & Desktop Studio (admaster + admaster-cli)
-            -------------------------------------------------------------------
-            - Complete rewrite from Python/NumPy/SciPy into a high-performance pure-Rust
-              desktop studio (admaster) and standalone command-line runner (admaster-cli)
-              for Windows, macOS (Universal arm64 + x86_64 .app), and Linux (glibc 2.28+).
-            - Streaming 30-second Catmull-Rom cubic warp renderer and windowed Reference
-              Master Audio gap splicer reduce peak memory usage from 3.5+ GiB down to
-              under 55 MB RAM on full-length feature films.
+            Sync Accuracy Fixes (Correlation & Time-Warp Verified on US + UK Tracks)
+            ------------------------------------------------------------------------
+            - Fixed PAL auto-detection falsely forcing a 25fps -> 23.976fps slowdown
+              based on "[UK]" filename clues; Auto-Detect now always decodes at native
+              1.0x and runs the Shazam-style constellation speed prober to verify true
+              PAL transfers without corrupting native-speed UK tracks.
+            - Fixed Time-Warp offset_hint sign inversion between 100-anchor correlation
+              and the Viterbi candidate lattice, eliminating false cut hallucinations
+              and ensuring clean alignment.
+            - Aligned STFT 70th-percentile peak flooring, edge stripping, and spline
+              endpoint gap detection with upstream ADSync, and added micro-blip spur
+              filtering for single-segment continuity.
+            - Confirmed both single-offset Correlation and non-linear Time-Warp modes
+              produce clean, in-sync outputs across both US and UK Audio Description
+              tracks.
 
-            Alignment, PAL Probing & Non-Linear Warping
-            -------------------------------------------
-            - 100-anchor 3-band narration-suppressed FFT cross-correlation (4th-order
-              Butterworth SOS filtfilt downweighting the 250-1200 Hz speech band to 0.2).
-            - Automatic 2-second Shazam-style STFT landmark constellation PAL speed
-              prober (detects 25.0 fps vs. 23.976 fps transfers without filename tags).
-            - Native Rust implementation of the ADSync non-linear alignment pipeline
-              (second-order Viterbi candidate lattice dynamic programming, monotone
-              Fritsch-Carlson PCHIP cubic spline fitting, and silence-nudged cut boundary
-              refinement).
-            - Removed legacy DescribeAlign support in favor of the faster, continuous
-              Viterbi + PCHIP spline warp architecture.
+            15x Faster DSP Engine & Non-Linear Time-Warp
+            --------------------------------------------
+            - Replaced repeated per-anchor FFT planning with a thread-local cached
+              5-smooth f32 SIMD FFT using 2-real-in-1 Hermitian packing.
+            - Rebuilt landmark histogram matching as a single-pass O(n_matches) bucket
+              accumulator and pre-computed multiband signals once per track.
+            - Added fingerprint-guided tight interior search windows for fast, accurate
+              feature-length alignment.
 
-            Two-Zone Drag-and-Drop GUI & Mastering Deliverables
-            ---------------------------------------------------
-            - Color-coded two-zone drag-and-drop staging studio: drop a video/surround
-              master (.mkv, .mp4, .m2ts, .dts, .dtshd, .thd) to set Zone 1 (Reference
-              Master) and drop syncable audio files (.mp3, .m4a, .flac, .aac, .ogg, .wav,
-              .ac3, .eac3) to queue Zone 2 (Tracks to Sync).
-            - Interactive PCHIP warp curve and 100-anchor correlation inspector, plus a
-              full-height two-pane Settings view and Dark/Light/System Auto theme support.
-            - Broadcast-standard ITU-R BS.775 True 2.0 stereo downmixing, EBU R128 Night
-              Mode loudness normalization (-16 LUFS), and one-pass MKVMerge multiplexing.
+            Friendly Report Card UI, Live Progress & Stream Inspector
+            ---------------------------------------------------------
+            - Redesigned the desktop workspace into a clean vertical Step 1 / Step 2
+              staging flow with live output filename previews and an async ffprobe
+              "Match Against" audio stream selector showing language, channel layout,
+              codec, and default/commentary flags.
+            - Added a live 4-stage progress dashboard with per-track progress, dual
+              Overall and Current Task progress bars driven by real-time FFmpeg and
+              mkvmerge progress parsing, and clickable Elapsed <-> ETA timers.
+            - Upgraded the Sync Report to the Layout C Friendly Report Card: prominent
+              plain-English sync summary banner, 4-card sync checklist, visual Movie
+              Structure Map filmstrip, interactive hover alignment timeline, and
+              Output Files Ready with Reveal/Open Folder actions.
+            - Added instant FFmpeg/mkvmerge cancellation that terminates running child
+              processes immediately and cleans up partial output files.
+            - Session logs now save alongside the source MKV folder by default, with
+              customizable output folder and token-based log filename templates in
+              Settings -> Appearance & Logs (and --log-pattern in admaster-cli).
             ```
           files: dist/*

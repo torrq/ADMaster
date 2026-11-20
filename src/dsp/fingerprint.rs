@@ -6,8 +6,8 @@ const N_FFT: usize = 512; // 64 ms window at 8 kHz -> 15.625 Hz bins
 const HOP: usize = 128; // 16 ms hop at 8 kHz
 const FMIN_HZ: f64 = 100.0;
 const FMAX_HZ: f64 = 3800.0;
-const PEAK_NEIGHBOR_FREQ: usize = 8;
-const PEAK_NEIGHBOR_TIME: usize = 7;
+const PEAK_NEIGHBOR_FREQ: usize = 10;
+const PEAK_NEIGHBOR_TIME: usize = 8;
 const PEAKS_PER_SEC: usize = 35;
 const PAIR_DT_MIN: usize = 3; // 48 ms
 const PAIR_DT_MAX: usize = 48; // 768 ms
@@ -116,11 +116,10 @@ pub fn extract_landmarks(y: &[f32], sr: u32) -> (Vec<u32>, Vec<f32>) {
     let fft = planner.plan_fft_forward(N_FFT);
     let mut fft_buf = vec![Complex::new(0.0_f32, 0.0_f32); N_FFT];
 
-    // Compact row-major spectrogram (n_frames x n_bins) in dB: for 3h @ 8kHz (675k frames x 230 bins)
-    // we filter per-frame local maxima across frequency first, keeping only candidate frequency peaks per frame!
-    // That reduces storage from 600 MB down to ~12 MB.
+    // Sample all spectrogram bins across strided frames for the exact 70th-percentile floor (matches ADSync _FLOOR_PERCENTILE = 70.0)
+    let sample_stride = (n_frames / 1000).max(1);
     let mut frame_freq_peaks: Vec<Vec<(u16, f32)>> = Vec::with_capacity(n_frames);
-    let mut all_mags_sample = Vec::with_capacity(n_frames);
+    let mut all_bins_sample = Vec::with_capacity((n_frames / sample_stride + 1) * (n_bins / 4 + 1));
     let mut mag_row = vec![0.0_f32; n_bins];
 
     for frame_idx in 0..n_frames {
@@ -131,18 +130,15 @@ pub fn extract_landmarks(y: &[f32], sr: u32) -> (Vec<u32>, Vec<f32>) {
         }
         fft.process(&mut fft_buf);
 
-        let mut frame_max = -120.0_f32;
+        let record_sample = frame_idx % sample_stride == 0;
         for b in 0..n_bins {
             let c = fft_buf[lo_bin + b];
-            let mag_sq = c.re * c.re + c.im * c.im;
-            let db = 10.0 * (mag_sq + 1e-12).log10();
+            let mag = (c.re * c.re + c.im * c.im).sqrt();
+            let db = 20.0 * (mag + 1e-10).log10();
             mag_row[b] = db;
-            if db > frame_max {
-                frame_max = db;
+            if record_sample && b % 4 == 0 {
+                all_bins_sample.push(db);
             }
-        }
-        if frame_idx % 8 == 0 {
-            all_mags_sample.push(frame_max);
         }
 
         // Local frequency maxima within +/- PEAK_NEIGHBOR_FREQ bins
@@ -165,11 +161,11 @@ pub fn extract_landmarks(y: &[f32], sr: u32) -> (Vec<u32>, Vec<f32>) {
         frame_freq_peaks.push(f_peaks);
     }
 
-    if all_mags_sample.is_empty() {
+    if all_bins_sample.is_empty() {
         return (Vec::new(), Vec::new());
     }
-    all_mags_sample.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let floor_db = all_mags_sample[(all_mags_sample.len() * 35) / 100] - 12.0;
+    all_bins_sample.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let floor_db = all_bins_sample[(all_bins_sample.len() * 70) / 100];
 
     // 2D Temporal + Frequency neighborhood suppression (+/- PEAK_NEIGHBOR_TIME frames, +/- PEAK_NEIGHBOR_FREQ bins)
     let frames_per_sec = (sr as f64) / (HOP as f64);
@@ -297,16 +293,20 @@ pub fn fingerprint_align_from_landmarks(
         };
     }
 
-    // Histogram per-bucket dominant offset at 50ms resolution (including +/- 1 neighbor bin voting)
+    // Bucket all raw (at, vt) pairs in ONE O(n_matches) pass and build per-bucket histograms
+    let mut bucket_pairs: Vec<Vec<(f32, f32)>> = vec![Vec::new(); n_buckets];
     let mut bucket_hist: Vec<HashMap<i64, usize>> = vec![HashMap::new(); n_buckets];
     for (&at, &vt) in t_ad.iter().zip(t_vid.iter()) {
         let b = (((at as f64) / BUCKET_SEC) as usize).min(n_buckets - 1);
+        bucket_pairs[b].push((at, vt));
         let off = (vt as f64) - (at as f64);
         let obin = (off / OFFSET_RES).round() as i64;
         for d in -1..=1 {
             *bucket_hist[b].entry(obin + d).or_insert(0) += 1;
         }
     }
+    drop(t_ad);
+    drop(t_vid);
 
     let mut bucket_offset: Vec<Option<f64>> = vec![None; n_buckets];
     let mut bucket_matches: Vec<usize> = vec![0; n_buckets];
@@ -317,14 +317,12 @@ pub fn fingerprint_align_from_landmarks(
         {
             if best_cnt >= MIN_BUCKET_MATCHES {
                 let rough_off = (best_bin as f64) * OFFSET_RES;
-                // Refine with median of matches near dominant bin
-                let mut near: Vec<f64> = t_ad
+                // Refine with median of matches in THIS bucket near dominant bin (O(|bucket_b|))
+                let mut near: Vec<f64> = bucket_pairs[b]
                     .iter()
-                    .zip(t_vid.iter())
-                    .filter_map(|(&at, &vt)| {
-                        let mb = (((at as f64) / BUCKET_SEC) as usize).min(n_buckets - 1);
+                    .filter_map(|&(at, vt)| {
                         let off = (vt as f64) - (at as f64);
-                        if mb == b && (off - rough_off).abs() <= 2.0 * OFFSET_RES {
+                        if (off - rough_off).abs() <= 2.0 * OFFSET_RES {
                             Some(off)
                         } else {
                             None
@@ -428,21 +426,19 @@ pub fn fingerprint_align_from_landmarks(
         }
     }
 
-    let mut inlier_pairs: Vec<(f32, f32)> = t_ad
-        .into_iter()
-        .zip(t_vid.into_iter())
-        .filter(|&(at, vt)| {
-            let b = (((at as f64) / BUCKET_SEC) as usize).min(n_buckets - 1);
-            if !covered[b] {
-                return false;
+    let mut inlier_pairs: Vec<(f32, f32)> = Vec::new();
+    for b in 0..n_buckets {
+        if !covered[b] {
+            continue;
+        }
+        if let Some(bo) = bucket_offset[b] {
+            for &(at, vt) in &bucket_pairs[b] {
+                if ((vt as f64) - (at as f64) - bo).abs() <= 0.75 {
+                    inlier_pairs.push((at, vt));
+                }
             }
-            if let Some(bo) = bucket_offset[b] {
-                ((vt as f64) - (at as f64) - bo).abs() <= 0.75
-            } else {
-                false
-            }
-        })
-        .collect();
+        }
+    }
     inlier_pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
     let (match_t_ad, match_t_vid): (Vec<f32>, Vec<f32>) = inlier_pairs.into_iter().unzip();
@@ -501,16 +497,81 @@ pub fn resample_linear_ratio(y: &[f32], stretch: f64) -> Vec<f32> {
     out
 }
 
-/// Automatic Acoustic Landmark PAL / Speed Prober:
-/// Probes native 1.0x against PAL transfer ratios (`25.0 / 23.976024 = 1.0427093` and `25.0 / 24.0 = 1.0416667`).
-/// Returns `(is_pal, detected_stretch_ratio, match_count, baseline_fp)`.
+fn fit_residual_speed_slope(fp: &FingerprintResult) -> f64 {
+    // 1. Estimate from raw inlier match pairs when dense enough (matches ADSync speed.py)
+    if fp.match_t_ad.len() >= 200 {
+        let n = fp.match_t_ad.len();
+        let stride = (n / 1500).max(1);
+        let mut ts = Vec::with_capacity(n / stride + 1);
+        let mut os = Vec::with_capacity(n / stride + 1);
+        for i in (0..n).step_by(stride) {
+            let at = fp.match_t_ad[i] as f64;
+            let vt = fp.match_t_vid[i] as f64;
+            ts.push(at);
+            os.push(vt - at);
+        }
+        let mut slopes = Vec::new();
+        for i in 0..ts.len() {
+            for j in (i + 1)..ts.len() {
+                let dt = ts[j] - ts[i];
+                if (30.0..=180.0).contains(&dt) {
+                    slopes.push((os[j] - os[i]) / dt);
+                } else if dt > 180.0 {
+                    break;
+                }
+            }
+        }
+        if slopes.len() >= 50 {
+            slopes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            return slopes[slopes.len() / 2];
+        }
+    }
+
+    // 2. Fallback: weighted median of pairwise span slopes
+    if fp.spans.len() < 2 {
+        return 0.0;
+    }
+    let mut pairs: Vec<(f64, f64)> = Vec::new();
+    for i in 0..fp.spans.len() {
+        let mi = 0.5 * (fp.spans[i].ad_start + fp.spans[i].ad_end);
+        for j in (i + 1)..fp.spans.len() {
+            let mj = 0.5 * (fp.spans[j].ad_start + fp.spans[j].ad_end);
+            let dt = mj - mi;
+            if (60.0..=240.0).contains(&dt) {
+                let s = (fp.spans[j].offset - fp.spans[i].offset) / dt;
+                let w = fp.spans[i].matches.min(fp.spans[j].matches) as f64;
+                pairs.push((s, w));
+            }
+        }
+    }
+    if pairs.is_empty() {
+        return 0.0;
+    }
+    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let total_w: f64 = pairs.iter().map(|p| p.1).sum();
+    let mut acc = 0.0;
+    for (s, w) in pairs {
+        acc += w;
+        if acc >= 0.5 * total_w {
+            return s;
+        }
+    }
+    0.0
+}
+
+/// Automatic Acoustic Landmark PAL / Speed Prober (matches ADSync align/speed.py):
+/// Probes native 1.0x first, then standard transfer ratios (`25/23.976`, `25/24`, `23.976/25`, `24/25`),
+/// refines residual slope, and verifies the result is strong and flat.
+/// Returns `(speed_detected, detected_stretch_ratio, match_count, best_fp)`.
 pub fn detect_speed_pal(
     y_vid: &[f32],
     y_ad: &[f32],
     sr: u32,
 ) -> (bool, f64, usize, FingerprintResult) {
-    let (vid_h, vid_t) = extract_landmarks(y_vid, sr);
-    let (ad_h, ad_t) = extract_landmarks(y_ad, sr);
+    let ((vid_h, vid_t), (ad_h, ad_t)) = rayon::join(
+        || extract_landmarks(y_vid, sr),
+        || extract_landmarks(y_ad, sr),
+    );
     let ad_dur = (y_ad.len() as f64) / (sr as f64);
     let base_fp = fingerprint_align_from_landmarks(&vid_h, &vid_t, &ad_h, &ad_t, ad_dur);
     let base_quality: usize = if base_fp.is_strong() {
@@ -519,14 +580,39 @@ pub fn detect_speed_pal(
         0
     };
 
-    if base_quality >= 500 {
+    if base_quality > 0 {
+        let base_slope = fit_residual_speed_slope(&base_fp);
+        if base_slope.abs() < 0.003 {
+            return (false, 1.0, base_quality, base_fp);
+        }
+        // Baseline matched strongly but shows a genuine speed ramp (> 0.3%)
+        let refined = 1.0 + base_slope;
+        let stretched = resample_linear_ratio(y_ad, refined);
+        let (st_h, st_t) = extract_landmarks(&stretched, sr);
+        let fp_v = fingerprint_align_from_landmarks(
+            &vid_h,
+            &vid_t,
+            &st_h,
+            &st_t,
+            (stretched.len() as f64) / (sr as f64),
+        );
+        let slope_v = fit_residual_speed_slope(&fp_v);
+        if fp_v.is_strong() && slope_v.abs() <= 0.001 {
+            let q = fp_v.spans.iter().map(|s| s.matches).sum();
+            return (true, refined, q, fp_v);
+        }
         return (false, 1.0, base_quality, base_fp);
     }
 
-    // Probe standard PAL transfer ratios
-    let ratios = [25.0 / 23.976023976, 25.0 / 24.0];
+    // Nothing matched strongly at 1.0x: probe standard PAL / film speed transfer ratios
+    let ratios = [
+        25.0 / 23.976023976, // PAL AD (fast) vs 23.976fps NTSC film video
+        25.0 / 24.0,         // PAL AD (fast) vs 24.000fps cinema video
+        23.976023976 / 25.0, // 23.976fps AD vs 25fps PAL video
+        24.0 / 25.0,         // 24.000fps AD vs 25fps PAL video
+    ];
     let mut best_ratio = 1.0;
-    let mut best_quality = base_quality;
+    let mut best_quality = 0usize;
     let mut best_fp: Option<FingerprintResult> = None;
 
     for &ratio in &ratios {
@@ -539,16 +625,36 @@ pub fn detect_speed_pal(
         } else {
             0
         };
-        if q > best_quality && q >= 350 && q >= 3 * base_quality.max(1) {
+        if q > best_quality {
             best_quality = q;
             best_ratio = ratio;
             best_fp = Some(fp_r);
         }
     }
 
-    if let Some(fp_pal) = best_fp {
-        (true, best_ratio, best_quality, fp_pal)
-    } else {
-        (false, 1.0, base_quality, base_fp)
+    if let Some(fp_cand) = best_fp {
+        if best_quality >= 350 && best_quality >= 3 * base_quality.max(1) {
+            let resid = fit_residual_speed_slope(&fp_cand);
+            let refined = best_ratio * (1.0 + resid);
+            if resid.abs() > 0.0003 {
+                let stretched_v = resample_linear_ratio(y_ad, refined);
+                let (vh, vt) = extract_landmarks(&stretched_v, sr);
+                let fp_v = fingerprint_align_from_landmarks(
+                    &vid_h,
+                    &vid_t,
+                    &vh,
+                    &vt,
+                    (stretched_v.len() as f64) / (sr as f64),
+                );
+                let slope_v = fit_residual_speed_slope(&fp_v);
+                if fp_v.is_strong() && slope_v.abs() <= 0.0015 {
+                    let qv = fp_v.spans.iter().map(|s| s.matches).sum();
+                    return (true, refined, qv, fp_v);
+                }
+            }
+            return (true, best_ratio, best_quality, fp_cand);
+        }
     }
+
+    (false, 1.0, base_quality, base_fp)
 }

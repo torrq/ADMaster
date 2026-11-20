@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilledGapReport {
@@ -29,6 +30,7 @@ pub fn fill_master_audio_gaps_windowed(
     threads: usize,
     explicit_gaps: &[(f64, f64, f64)],
     crossfade_ms: u32,
+    cancel_flag: &AtomicBool,
 ) -> Result<Vec<FilledGapReport>, String> {
     if explicit_gaps.is_empty() {
         return Ok(Vec::new());
@@ -68,6 +70,7 @@ pub fn fill_master_audio_gaps_windowed(
         channels,
         scratch_dir,
         threads,
+        cancel_flag,
     )?;
 
     let mut ad_reader = WavStreamReader::open(ad_wav_path)?;

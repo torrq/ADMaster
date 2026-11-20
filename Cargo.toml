@@ -1,6 +1,6 @@
 [package]
 name = "admaster"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2021"
 description = "High-performance pure-Rust Audio Description (AD) synchronization, non-linear Viterbi+PCHIP warping, ITU-R BS.775 downmixing, and Matroska mastering toolkit"
 license = "MIT"

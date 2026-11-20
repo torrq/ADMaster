@@ -1,3 +1,4 @@
+use chrono::Local;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -7,6 +8,7 @@ pub const DEFAULT_WINDOW_WIDTH: f32 = 1080.0;
 pub const DEFAULT_WINDOW_HEIGHT: f32 = 760.0;
 pub const MIN_WINDOW_WIDTH: f32 = 820.0;
 pub const MIN_WINDOW_HEIGHT: f32 = 580.0;
+pub const DEFAULT_LOG_FILENAME_PATTERN: &str = "{title} - ADMaster Sync ({date}).log";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThemeMode {
@@ -49,17 +51,17 @@ pub enum SyncMode {
 impl SyncMode {
     pub fn label(self) -> &'static str {
         match self {
-            SyncMode::Auto => "Auto (100-Anchor -> Viterbi+PCHIP Warp Fallback)",
-            SyncMode::OffsetOnly => "Single Global Offset Only (No Non-Linear Warp)",
-            SyncMode::ForceWarp => "Force Non-Linear Viterbi+PCHIP Warp",
+            SyncMode::Auto => "Automatic (Matches Same Cut or Different Cuts)",
+            SyncMode::OffsetOnly => "Simple Delay Only (Same Cut, No Time-Warping)",
+            SyncMode::ForceWarp => "Force Time-Warp (Different Cuts / Edited Scenes)",
         }
     }
 
     pub fn short_label(self) -> &'static str {
         match self {
-            SyncMode::Auto => "Auto",
-            SyncMode::OffsetOnly => "Offset Only",
-            SyncMode::ForceWarp => "Force Warp",
+            SyncMode::Auto => "Automatic",
+            SyncMode::OffsetOnly => "Simple Delay",
+            SyncMode::ForceWarp => "Force Time-Warp",
         }
     }
 
@@ -79,17 +81,17 @@ pub enum PalMode {
 impl PalMode {
     pub fn label(self) -> &'static str {
         match self {
-            PalMode::AutoDetect => "Auto-Detect (Acoustic Landmark Speed Probe)",
-            PalMode::ForcePal => "Force PAL Slowdown (25.0 fps -> 23.976 fps)",
-            PalMode::ForceNative => "Force Native 1.0x Speed (Disable PAL Slowdown)",
+            PalMode::AutoDetect => "Auto-Detect (Checks for 25fps PAL Speedup)",
+            PalMode::ForcePal => "Force PAL Slowdown (25fps -> 23.976fps)",
+            PalMode::ForceNative => "Keep Original Speed (No PAL Slowdown)",
         }
     }
 
     pub fn short_label(self) -> &'static str {
         match self {
-            PalMode::AutoDetect => "Auto Probe",
-            PalMode::ForcePal => "Force PAL",
-            PalMode::ForceNative => "Force 1.0x",
+            PalMode::AutoDetect => "Auto-Detect",
+            PalMode::ForcePal => "Slow Down PAL",
+            PalMode::ForceNative => "Keep Original",
         }
     }
 
@@ -145,6 +147,7 @@ pub struct AppConfig {
     pub debug_mode: bool,
     pub log_to_file: bool,
     pub log_dir: String,
+    pub log_filename_pattern: String,
     pub custom_output_dir: String,
     pub custom_mkv_dir: String,
 }
@@ -189,8 +192,9 @@ impl Default for AppConfig {
             clean_scratch: false,
             keep_scratch: false,
             debug_mode: false,
-            log_to_file: false,
+            log_to_file: true,
             log_dir: String::new(),
+            log_filename_pattern: DEFAULT_LOG_FILENAME_PATTERN.to_string(),
             custom_output_dir: String::new(),
             custom_mkv_dir: String::new(),
         }
@@ -395,9 +399,103 @@ impl AppConfig {
         if let Some(v) = leg.log_to_file {
             self.log_to_file = v;
         }
-        if let Some(v) = leg.log_dir {
-            self.log_dir = v;
+        // Note: intentionally ignore legacy `log_dir` so fresh setups default to saving logs
+        // in the same directory as the MKV file unless explicitly configured in Settings.
+        let _ = leg.log_dir;
+    }
+
+    /// Expands syntax tokens in `log_filename_pattern`:
+    /// `{title}`, `{mkv}`, `{date}`, `{time}`, `{datetime}`, `{year}`, `{month}`, `{day}`,
+    /// `{hour}`, `{minute}`, `{second}`, `{tracks}`, `{method}`.
+    pub fn format_log_filename(
+        &self,
+        title: &str,
+        mkv_stem: &str,
+        track_count: usize,
+        method_tag: &str,
+    ) -> String {
+        let now = Local::now();
+        let raw_pat = if self.log_filename_pattern.trim().is_empty() {
+            DEFAULT_LOG_FILENAME_PATTERN
+        } else {
+            self.log_filename_pattern.trim()
+        };
+
+        let sanitize_part = |s: &str| -> String {
+            s.chars()
+                .map(|c| match c {
+                    '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+                    c if c.is_control() => '_',
+                    other => other,
+                })
+                .collect::<String>()
+                .trim()
+                .to_string()
+        };
+
+        let clean_title = sanitize_part(title);
+        let clean_mkv = sanitize_part(mkv_stem);
+        let mut out = raw_pat
+            .replace("{title}", &clean_title)
+            .replace("{mkv}", &clean_mkv)
+            .replace("{date}", &now.format("%Y-%m-%d").to_string())
+            .replace("{time}", &now.format("%H-%M-%S").to_string())
+            .replace("{datetime}", &now.format("%Y%m%d_%H%M%S").to_string())
+            .replace("{year}", &now.format("%Y").to_string())
+            .replace("{month}", &now.format("%m").to_string())
+            .replace("{day}", &now.format("%d").to_string())
+            .replace("{hour}", &now.format("%H").to_string())
+            .replace("{minute}", &now.format("%M").to_string())
+            .replace("{second}", &now.format("%S").to_string())
+            .replace("{tracks}", &track_count.to_string())
+            .replace("{method}", &sanitize_part(method_tag));
+
+        out = sanitize_part(&out);
+        if out.is_empty() {
+            out = format!("{}_ADMaster.log", now.format("%Y%m%d_%H%M%S"));
         }
+        let lower = out.to_ascii_lowercase();
+        if !(lower.ends_with(".log") || lower.ends_with(".txt") || lower.ends_with(".md")) {
+            out.push_str(".log");
+        }
+        out
+    }
+
+    /// Resolves the output directory for session logs.
+    /// Defaults to the directory containing the movie/MKV file when `log_dir` is blank.
+    /// Supports optional tokens in custom `log_dir`: `{mkv_dir}`, `{output_dir}`, `{date}`, `{year}`, `{month}`, `{day}`, `{title}`.
+    pub fn resolve_log_dir(
+        &self,
+        ref_path: &Path,
+        project_dir: &Path,
+        out_dir: &Path,
+        title: &str,
+    ) -> PathBuf {
+        let mkv_dir = ref_path.parent().unwrap_or(project_dir);
+        let raw = self.log_dir.trim();
+        if raw.is_empty() {
+            return mkv_dir.to_path_buf();
+        }
+        let now = Local::now();
+        let clean_title: String = title
+            .chars()
+            .map(|c| match c {
+                '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+                c if c.is_control() => '_',
+                other => other,
+            })
+            .collect::<String>()
+            .trim()
+            .to_string();
+        let expanded = raw
+            .replace("{mkv_dir}", &mkv_dir.to_string_lossy())
+            .replace("{output_dir}", &out_dir.to_string_lossy())
+            .replace("{date}", &now.format("%Y-%m-%d").to_string())
+            .replace("{year}", &now.format("%Y").to_string())
+            .replace("{month}", &now.format("%m").to_string())
+            .replace("{day}", &now.format("%d").to_string())
+            .replace("{title}", &clean_title);
+        PathBuf::from(expanded)
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -424,6 +522,9 @@ impl AppConfig {
         self.target_tp = self.target_tp.clamp(-9.0, 0.0);
         if self.ref_stream.trim().is_empty() {
             self.ref_stream = "0:a:0".to_string();
+        }
+        if self.log_filename_pattern.trim().is_empty() {
+            self.log_filename_pattern = DEFAULT_LOG_FILENAME_PATTERN.to_string();
         }
         self.sanitize_window_geometry();
     }

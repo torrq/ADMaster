@@ -208,6 +208,7 @@ fn downsample_2x(y: &[f32]) -> Vec<f32> {
 }
 
 /// Builds the candidate lattice at ~4 kHz using 3-band narration-suppressed cross-correlation.
+#[allow(clippy::too_many_arguments)]
 pub fn build_candidate_lattice<F>(
     y_vid_8k: &[f32],
     y_ad_8k: &[f32],
@@ -219,6 +220,7 @@ pub fn build_candidate_lattice<F>(
     fp: Option<&FingerprintResult>,
     max_candidates: usize,
     multiband: bool,
+    cancel_flag: &std::sync::atomic::AtomicBool,
     on_progress: F,
 ) -> Vec<CandidateWindow>
 where
@@ -235,23 +237,39 @@ where
     };
     let sec_per_sample = 1.0 / ds_sr;
 
-    let mut vid_l0 = Vec::new();
-    let mut vid_l1 = Vec::new();
-    let mut ad_l0 = Vec::new();
-    let mut ad_l1 = Vec::new();
+    let mut vid_low = Vec::new();
+    let mut vid_mid = Vec::new();
+    let mut vid_high = Vec::new();
+    let mut ad_low = Vec::new();
+    let mut ad_mid = Vec::new();
+    let mut ad_high = Vec::new();
 
     if multiband {
-        let f0 = Butter4Lowpass::new(BAND_EDGES.0, ds_sr);
-        let f1 = Butter4Lowpass::new(BAND_EDGES.1, ds_sr);
-        f0.filtfilt(&vid, &mut vid_l0);
-        f1.filtfilt(&vid, &mut vid_l1);
-        f0.filtfilt(&ad, &mut ad_l0);
-        f1.filtfilt(&ad, &mut ad_l1);
+        let split_bands = |sig: &[f32]| -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+            let f0 = Butter4Lowpass::new(BAND_EDGES.0, ds_sr);
+            let f1 = Butter4Lowpass::new(BAND_EDGES.1, ds_sr);
+            let mut l0 = Vec::new();
+            let mut l1 = Vec::new();
+            f0.filtfilt(sig, &mut l0);
+            f1.filtfilt(sig, &mut l1);
+            let mid: Vec<f32> = l1.iter().zip(l0.iter()).map(|(&a, &b)| a - b).collect();
+            let high: Vec<f32> = sig.iter().zip(l1.iter()).map(|(&a, &b)| a - b).collect();
+            (l0, mid, high)
+        };
+        let ((vl, vm, vh), (al, am, ah)) =
+            rayon::join(|| split_bands(&vid), || split_bands(&ad));
+        vid_low = vl;
+        vid_mid = vm;
+        vid_high = vh;
+        ad_low = al;
+        ad_mid = am;
+        ad_high = ah;
     }
 
     let win_samples = (window_sec / sec_per_sample) as usize;
     let step_samples = ((step_sec / sec_per_sample) as usize).max(1);
-    let search_samples = (search_radius_sec / sec_per_sample) as usize;
+    let full_search_samples = (search_radius_sec / sec_per_sample) as usize;
+    let tight_search_samples = ((search_radius_sec.min(8.0)) / sec_per_sample) as usize;
     let min_peak_dist = (win_samples / 4).max(1);
     let min_score = 0.28_f64;
 
@@ -262,18 +280,24 @@ where
     let ad_positions: Vec<usize> = (0..ad.len() - win_samples).step_by(step_samples).collect();
     let total_windows = ad_positions.len();
     let use_fp = fp.filter(|f| f.is_strong());
+    let completed = std::sync::atomic::AtomicUsize::new(0);
 
-    let mut lattice = Vec::with_capacity(total_windows);
-    let batch_size = 32;
+    let mut lattice: Vec<CandidateWindow> = ad_positions
+        .par_iter()
+        .map(|&ad_start| {
+            let ad_end = ad_start + win_samples;
+            let a_full = &ad[ad_start..ad_end];
+            let ad_center_sec = ((ad_start as f64) + (win_samples as f64) * 0.5) * sec_per_sample;
+            if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                return CandidateWindow {
+                    source_center: ad_center_sec,
+                    candidates: Vec::new(),
+                    speech_score: 0.0,
+                    energy: 0.0,
+                };
+            }
 
-    for chunk in ad_positions.chunks(batch_size) {
-        let batch_wins: Vec<CandidateWindow> = chunk
-            .par_iter()
-            .map(|&ad_start| {
-                let ad_end = ad_start + win_samples;
-                let a_full = &ad[ad_start..ad_end];
-                let ad_center_sec = ((ad_start as f64) + (win_samples as f64) * 0.5) * sec_per_sample;
-
+            let result = (|| -> CandidateWindow {
                 let mean_a: f64 =
                     a_full.iter().map(|&x| x as f64).sum::<f64>() / (win_samples as f64);
                 let mut a_energy_sq = 0.0_f64;
@@ -291,13 +315,29 @@ where
                     };
                 }
 
-                let expected_off = use_fp
-                    .and_then(|f| f.offset_at(ad_center_sec))
-                    .unwrap_or(offset_hint);
+                // Inside the verified interior of a continuous strong fingerprint span
+                // (>12s from span edges), offset is already known within +/-0.5s, so a tight
+                // +/-8s search captures local drift while keeping FFTs small and cache-hot.
+                // Near span edges or outside spans, use the full search radius for cuts/jumps.
+                let mut expected_off = offset_hint;
+                let mut local_search_samples = full_search_samples;
+                if let Some(f) = use_fp {
+                    if let Some(off) = f.offset_at(ad_center_sec) {
+                        expected_off = off;
+                        if f.spans.iter().any(|s| {
+                            ad_center_sec >= s.ad_start + 12.0 && ad_center_sec <= s.ad_end - 12.0
+                        }) {
+                            local_search_samples = tight_search_samples;
+                        }
+                    }
+                }
+
                 let hint_samples = (expected_off / sec_per_sample).round() as isize;
                 let nominal_vid = (ad_start as isize) + hint_samples;
-                let search_start = (nominal_vid - (search_samples as isize)).max(0) as usize;
-                let search_end = ((nominal_vid + (search_samples as isize) + (win_samples as isize))
+                let search_start = (nominal_vid - (local_search_samples as isize)).max(0) as usize;
+                let search_end = ((nominal_vid
+                    + (local_search_samples as isize)
+                    + (win_samples as isize))
                     .max(0) as usize)
                     .min(vid.len());
 
@@ -314,27 +354,22 @@ where
                 let mut norm_corr: Option<Vec<f64>> = None;
                 let mut speech_score = 0.35_f64;
 
-                if multiband && !vid_l0.is_empty() {
-                    let vl0 = &vid_l0[search_start..search_end];
-                    let vl1 = &vid_l1[search_start..search_end];
-                    let al0 = &ad_l0[ad_start..ad_end];
-                    let al1 = &ad_l1[ad_start..ad_end];
-
-                    let v_mid: Vec<f32> = vl1.iter().zip(vl0.iter()).map(|(&a, &b)| a - b).collect();
-                    let a_mid: Vec<f32> = al1.iter().zip(al0.iter()).map(|(&a, &b)| a - b).collect();
-                    let v_high: Vec<f32> =
-                        v_full.iter().zip(vl1.iter()).map(|(&a, &b)| a - b).collect();
-                    let a_high: Vec<f32> =
-                        a_full.iter().zip(al1.iter()).map(|(&a, &b)| a - b).collect();
+                if multiband && !vid_low.is_empty() {
+                    let vl = &vid_low[search_start..search_end];
+                    let vm = &vid_mid[search_start..search_end];
+                    let vh = &vid_high[search_start..search_end];
+                    let al = &ad_low[ad_start..ad_end];
+                    let am = &ad_mid[ad_start..ad_end];
+                    let ah = &ad_high[ad_start..ad_end];
 
                     // Estimate speech ratio from mid-band energy vs full energy
-                    let mid_e: f64 = a_mid.iter().map(|&x| (x as f64) * (x as f64)).sum();
+                    let mid_e: f64 = am.iter().map(|&x| (x as f64) * (x as f64)).sum();
                     speech_score = (mid_e / (a_energy_sq + 1e-12)).clamp(0.0, 1.0);
 
                     let bands = [
-                        (vl0, al0, BAND_WEIGHTS[0]),
-                        (&v_mid[..], &a_mid[..], BAND_WEIGHTS[1]),
-                        (&v_high[..], &a_high[..], BAND_WEIGHTS[2]),
+                        (vl, al, BAND_WEIGHTS[0]),
+                        (vm, am, BAND_WEIGHTS[1]),
+                        (vh, ah, BAND_WEIGHTS[2]),
                     ];
                     let mut weight_sum = 0.0_f64;
                     for (vs, asig, w) in bands {
@@ -453,12 +488,15 @@ where
                     speech_score,
                     energy: ad_energy,
                 }
-            })
-            .collect();
+            })();
 
-        lattice.extend(batch_wins);
-        on_progress(lattice.len(), total_windows);
-    }
+            let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if done % 64 == 0 || done == total_windows {
+                on_progress(done, total_windows);
+            }
+            result
+        })
+        .collect();
 
     // Augment starved windows with fingerprint matches if available
     if let Some(fp_res) = use_fp {
@@ -637,42 +675,45 @@ pub fn decode_warp_path(
         (indices, min_c)
     };
 
-    // Spur suppression (runs up to 6 windows jumping > 2.0s away from agreeing flanks)
+    // Spur suppression:
+    // Pass 1: runs up to 6 windows jumping > 2.0s away from flanks agreeing within <= 0.5s
+    // Pass 2: short 1..=3 window micro-blips jumping > 0.15s away from flanks agreeing within <= 0.08s
     let mut path_offsets: Vec<f64> = (0..n)
         .map(|t| prepared[t].candidates[path_indices[t]].offset_sec)
         .collect();
     let mut spur = vec![false; n];
-    let max_spur_run = 6;
-    let spur_flank = 5;
+    let spur_flank = 5usize;
 
-    let mut t = 1usize;
-    while t + 1 < n {
-        let mut left_slice: Vec<f64> = path_offsets[t.saturating_sub(spur_flank)..t].to_vec();
-        left_slice.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let left_flank = left_slice[left_slice.len() / 2];
+    for &(max_spur_run, jump_thresh, flank_tol) in &[(6usize, 2.0_f64, 0.5_f64), (3usize, 0.15_f64, 0.08_f64)] {
+        let mut t = 1usize;
+        while t + 1 < n {
+            let mut left_slice: Vec<f64> = path_offsets[t.saturating_sub(spur_flank)..t].to_vec();
+            left_slice.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let left_flank = left_slice[left_slice.len() / 2];
 
-        let mut run_end = t;
-        while run_end < n
-            && (run_end - t) < max_spur_run
-            && (path_offsets[run_end] - left_flank).abs() > 2.0
-        {
-            run_end += 1;
-        }
-        if run_end > t && run_end < n {
-            let mut right_slice: Vec<f64> =
-                path_offsets[run_end..(run_end + spur_flank).min(n)].to_vec();
-            right_slice.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let right_flank = right_slice[right_slice.len() / 2];
-            if (right_flank - left_flank).abs() <= 0.5 {
-                let fill = 0.5 * (left_flank + right_flank);
-                for i in t..run_end {
-                    path_offsets[i] = fill;
-                    spur[i] = true;
-                }
-                t = run_end;
+            let mut run_end = t;
+            while run_end < n
+                && (run_end - t) < max_spur_run
+                && (path_offsets[run_end] - left_flank).abs() > jump_thresh
+            {
+                run_end += 1;
             }
+            if run_end > t && run_end < n {
+                let mut right_slice: Vec<f64> =
+                    path_offsets[run_end..(run_end + spur_flank).min(n)].to_vec();
+                right_slice.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let right_flank = right_slice[right_slice.len() / 2];
+                if (right_flank - left_flank).abs() <= flank_tol {
+                    let fill = 0.5 * (left_flank + right_flank);
+                    for i in t..run_end {
+                        path_offsets[i] = fill;
+                        spur[i] = true;
+                    }
+                    t = run_end;
+                }
+            }
+            t += 1;
         }
-        t += 1;
     }
 
     let points: Vec<WarpPoint> = (0..n)
@@ -733,6 +774,27 @@ fn prepare_lattice(
 
     let weak_evidence = 0.45_f64;
     let hint_contra = 3.0_f64;
+    let hood = 7usize;
+
+    let best_offs: Vec<Option<f64>> = lattice
+        .iter()
+        .map(|w| w.candidates.first().map(|c| c.offset_sec))
+        .collect();
+
+    let side_medians = |idx: usize| -> Vec<f64> {
+        let mut meds = Vec::new();
+        for (lo, hi) in [
+            (idx.saturating_sub(hood), idx),
+            (idx + 1, (idx + 1 + hood).min(n)),
+        ] {
+            let mut vals: Vec<f64> = best_offs[lo..hi].iter().filter_map(|&v| v).collect();
+            if !vals.is_empty() {
+                vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                meds.push(vals[vals.len() / 2]);
+            }
+        }
+        meds
+    };
 
     let mut prepared = Vec::with_capacity(n);
     for (i, w) in lattice.iter().enumerate() {
@@ -743,13 +805,22 @@ fn prepare_lattice(
             .unwrap_or(false);
         let mut contradicted = false;
         if strong {
+            let strong_offs: Vec<f64> = w
+                .candidates
+                .iter()
+                .filter(|c| c.score >= weak_evidence)
+                .map(|c| c.offset_sec)
+                .collect();
             if let Some(f) = fp {
                 if let Some(h) = f.offset_at(w.source_center) {
-                    contradicted = w
-                        .candidates
+                    contradicted = strong_offs.iter().all(|&o| (o - h).abs() > hint_contra);
+                }
+            } else {
+                let meds = side_medians(i);
+                if !meds.is_empty() {
+                    contradicted = meds
                         .iter()
-                        .filter(|c| c.score >= weak_evidence)
-                        .all(|c| (c.offset_sec - h).abs() > hint_contra);
+                        .all(|&m| strong_offs.iter().all(|&o| (o - m).abs() > hint_contra));
                 }
             }
         }
@@ -763,6 +834,8 @@ fn prepare_lattice(
             if let Some(h) = f.offset_at(w.source_center) {
                 synth_offs.push(h);
             }
+        } else {
+            synth_offs.extend(side_medians(i));
         }
         let mut cands = w.candidates.clone();
         for o in synth_offs {
@@ -869,25 +942,31 @@ pub fn fit_and_refine_warp(
     refine_boundaries_to_silence(&mut splines, &mut segment_ranges, y_ad_8k, sr_8k);
 
     let cuts = extract_cuts_from_points(&vetted_path, 0.20);
+    // Compute genuine excised-scene gaps from the ACTUAL rendered spline endpoints (not window centers!)
+    // so a 0s-offset movie never falsely triggers a 4-second intro/outro gap overwrite.
     let mut explicit_gaps = Vec::new();
-    if let Some(first_cut) = cuts.first() {
-        if first_cut.vid_start >= 0.20 {
-            explicit_gaps.push((0.0, first_cut.vid_start, first_cut.vid_start));
+    let mut rendered_spans: Vec<(f64, f64)> = Vec::new();
+    for (sp, &seg_range) in splines.iter().zip(segment_ranges.iter()) {
+        let vs = sp.eval(seg_range.0).clamp(0.0, video_duration);
+        let ve = sp.eval(seg_range.1).clamp(0.0, video_duration);
+        if ve > vs {
+            rendered_spans.push((vs, ve));
         }
-        for i in 0..cuts.len() - 1 {
-            let g_start = cuts[i].vid_end;
-            let g_end = cuts[i + 1].vid_start;
+    }
+    if let Some(&(first_vs, _)) = rendered_spans.first() {
+        if first_vs >= 0.35 {
+            explicit_gaps.push((0.0, first_vs, first_vs));
+        }
+        for i in 0..rendered_spans.len().saturating_sub(1) {
+            let g_start = rendered_spans[i].1;
+            let g_end = rendered_spans[i + 1].0;
             if g_end - g_start >= 0.50 {
                 explicit_gaps.push((g_start, g_end, g_end - g_start));
             }
         }
-        if let Some(last_cut) = cuts.last() {
-            if video_duration - last_cut.vid_end >= 0.50 {
-                explicit_gaps.push((
-                    last_cut.vid_end,
-                    video_duration,
-                    video_duration - last_cut.vid_end,
-                ));
+        if let Some(&(_, last_ve)) = rendered_spans.last() {
+            if video_duration - last_ve >= 0.50 {
+                explicit_gaps.push((last_ve, video_duration, video_duration - last_ve));
             }
         }
     }
@@ -955,11 +1034,36 @@ fn split_at_discontinuities(path: &[WarpPoint], threshold: f64) -> Vec<Vec<WarpP
     segments.into_iter().filter(|s| !s.is_empty()).collect()
 }
 
+fn strip_synthetic_edges(segments: Vec<Vec<WarpPoint>>, synth_conf: f64) -> Vec<Vec<WarpPoint>> {
+    let mut out = Vec::with_capacity(segments.len());
+    for seg in segments {
+        let mut head = 0usize;
+        while head < seg.len() && seg[head].confidence <= synth_conf {
+            head += 1;
+        }
+        let mut tail = seg.len();
+        while tail > head && seg[tail - 1].confidence <= synth_conf {
+            tail -= 1;
+        }
+        if head > 0 {
+            out.push(seg[..head].to_vec());
+        }
+        if tail > head {
+            out.push(seg[head..tail].to_vec());
+        }
+        if tail < seg.len() {
+            out.push(seg[tail..].to_vec());
+        }
+    }
+    out
+}
+
 fn vet_and_bridge(segments: Vec<Vec<WarpPoint>>) -> Vec<WarpPoint> {
+    let synth_conf = 0.12_f64;
+    let segments = strip_synthetic_edges(segments, synth_conf);
     if segments.len() <= 1 {
         return segments.into_iter().flatten().collect();
     }
-    let synth_conf = 0.12_f64;
     let reals: Vec<Vec<WarpPoint>> = segments
         .iter()
         .map(|s| s.iter().copied().filter(|p| p.confidence > synth_conf).collect())
@@ -1472,13 +1576,19 @@ pub fn extract_cuts_from_points(pts: &[WarpPoint], jump_threshold: f64) -> Vec<W
 /// Renders a warped 48kHz stereo WAV from `hq_ad_wav_path` into `output_wav_path` using streaming
 /// 30-second blocks and zero-allocation Catmull-Rom cubic interpolation + equal-power crossfades!
 /// Peak memory is < 35 MB regardless of movie duration (vs. ~12 GB in Python/NumPy).
-pub fn render_warped_wav_streaming(
+#[allow(clippy::too_many_arguments)]
+pub fn render_warped_wav_streaming<F>(
     hq_ad_wav_path: &Path,
     output_wav_path: &Path,
     plan: &WarpPlan,
     video_duration: f64,
     crossfade_ms: u32,
-) -> Result<(), String> {
+    cancel_flag: &std::sync::atomic::AtomicBool,
+    mut on_progress: F,
+) -> Result<(), String>
+where
+    F: FnMut(f64),
+{
     let mut reader = WavStreamReader::open(hq_ad_wav_path)?;
     let sr = reader.layout.sample_rate;
     let sr_f = sr as f64;
@@ -1519,6 +1629,11 @@ pub fn render_warped_wav_streaming(
 
     let mut cur_out_frame = 0u64;
     while cur_out_frame < total_out_frames {
+        if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            drop(writer);
+            let _ = std::fs::remove_file(output_wav_path);
+            return Err("Cancelled".to_string());
+        }
         let take = ((total_out_frames - cur_out_frame) as usize).min(block_frames);
         let block_end_frame = cur_out_frame + (take as u64);
         let slice = &mut out_block[..take * 2];
@@ -1597,7 +1712,8 @@ pub fn render_warped_wav_streaming(
                         + (3.0 * (p1 - p2) + (p3 - p0)) * u3)
                 };
 
-                // Apply inter-segment equal-power fade-in / fade-out at segment boundaries
+                // Apply inter-segment equal-power fade-in / fade-out or 15ms silence edge fades
+                let edge_fade = ((sr as u64) * 15 / 1000).max(1);
                 let mut gain = 1.0_f32;
                 if let Some(pe) = prev_end {
                     if pe > spec.out_start {
@@ -1606,7 +1722,13 @@ pub fn render_warped_wav_streaming(
                             let phase = ((out_f - spec.out_start) as f32) / (overlap as f32);
                             gain *= (phase * std::f32::consts::FRAC_PI_2).sin();
                         }
+                    } else if spec.out_start > 0 && out_f < spec.out_start + edge_fade {
+                        let phase = ((out_f - spec.out_start) as f32) / (edge_fade as f32);
+                        gain *= phase;
                     }
+                } else if spec.out_start > 0 && out_f < spec.out_start + edge_fade {
+                    let phase = ((out_f - spec.out_start) as f32) / (edge_fade as f32);
+                    gain *= phase;
                 }
                 if let Some(ns) = next_start {
                     if spec.out_end > ns {
@@ -1617,7 +1739,15 @@ pub fn render_warped_wav_streaming(
                         } else if out_f >= ns + overlap {
                             gain = 0.0;
                         }
+                    } else if spec.out_end < total_out_frames
+                        && out_f + edge_fade >= spec.out_end
+                    {
+                        let rem = spec.out_end.saturating_sub(out_f) as f32;
+                        gain *= (rem / (edge_fade as f32)).clamp(0.0, 1.0);
                     }
+                } else if spec.out_end < total_out_frames && out_f + edge_fade >= spec.out_end {
+                    let rem = spec.out_end.saturating_sub(out_f) as f32;
+                    gain *= (rem / (edge_fade as f32)).clamp(0.0, 1.0);
                 }
 
                 sample_l *= gain;
@@ -1631,8 +1761,12 @@ pub fn render_warped_wav_streaming(
 
         writer.write_interleaved_f32(slice)?;
         cur_out_frame = block_end_frame;
+        if total_out_frames > 0 {
+            on_progress((cur_out_frame as f64) / (total_out_frames as f64));
+        }
     }
 
     writer.finalize()?;
+    on_progress(1.0);
     Ok(())
 }

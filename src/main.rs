@@ -75,7 +75,12 @@ fn main() -> eframe::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::dsp::correlation::{evaluate_anchor_correlations, find_offset_candidates};
+    use crate::config::AppConfig;
+    use crate::dsp::correlation::{
+        evaluate_anchor_correlations, find_offset_candidates, next_fast_even_len,
+        normalized_sliding_correlation,
+    };
+    use std::path::Path;
     use crate::dsp::fingerprint::fingerprint_align;
     use crate::dsp::gap_fill::fill_master_audio_gaps_windowed;
     use crate::dsp::warp::{
@@ -140,6 +145,7 @@ mod tests {
             ad_sig[i + shift_samples] = ref_sig[i] + narrator;
         }
 
+        let cancel = std::sync::atomic::AtomicBool::new(false);
         let meas = evaluate_anchor_correlations(
             &ref_sig,
             &ad_sig,
@@ -147,6 +153,7 @@ mod tests {
             dur_sec as f64,
             15,
             true,
+            &cancel,
             |_, _, _| {},
         );
         let clusters = find_offset_candidates(&meas, 0.15, 0.03);
@@ -159,6 +166,86 @@ mod tests {
             winner.max_peak
         );
         assert!(winner.max_peak > 0.45);
+    }
+
+    #[test]
+    fn test_packed_fft_correlation_exact_match() {
+        // Verify 2-real-in-1-complex packed 5-smooth FFT matches brute-force normalized correlation
+        assert_eq!(next_fast_even_len(304_000), 307_200);
+        let n = 750usize;
+        let m = 211usize; // n + m - 1 = 960 = 2^6 * 3 * 5 (non-power-of-two 5-smooth)
+        let mut v = vec![0.0_f32; n];
+        let mut a = vec![0.0_f32; m];
+        for i in 0..n {
+            v[i] = ((i as f32) * 0.13).sin() + 0.4 * ((i as f32) * 0.47).cos();
+        }
+        for i in 0..m {
+            a[i] = v[i + 173] * 1.25 + 0.15; // scaled & shifted copy at lag 173
+        }
+        let fast = normalized_sliding_correlation(&v, &a).expect("non-empty correlation");
+        assert_eq!(fast.len(), n - m + 1);
+        let (best_lag, &best_val) = fast
+            .iter()
+            .enumerate()
+            .max_by(|x, y| x.1.partial_cmp(y.1).unwrap())
+            .unwrap();
+        assert_eq!(best_lag, 173, "Expected argmax at lag 173");
+        assert!(
+            best_val > 0.99,
+            "Expected strong correlation peak at lag 173, got {}",
+            best_val
+        );
+
+        let a_mean: f64 = a.iter().map(|&x| x as f64).sum::<f64>() / (m as f64);
+        let a_e: f64 = a
+            .iter()
+            .map(|&x| {
+                let c = (x as f64) - a_mean;
+                c * c
+            })
+            .sum::<f64>()
+            .sqrt();
+        let v_mean: f64 = v.iter().map(|&x| x as f64).sum::<f64>() / (n as f64);
+        let mut max_err = 0.0_f64;
+        for k in 0..(n - m + 1) {
+            let mut dot = 0.0_f64;
+            let mut ve_sq = 0.0_f64;
+            for j in 0..m {
+                let vc = (v[k + j] as f64) - v_mean;
+                let ac = (a[j] as f64) - a_mean;
+                dot += vc * ac;
+                ve_sq += vc * vc;
+            }
+            let exact = (dot / (a_e * ve_sq.sqrt())).clamp(-1.0, 1.0);
+            max_err = max_err.max((fast[k] - exact).abs());
+        }
+        assert!(
+            max_err < 1e-4,
+            "Packed f32 FFT correlation diverged from brute-force f64 by {}",
+            max_err
+        );
+    }
+
+    #[test]
+    fn test_log_filename_and_dir_tokens() {
+        let mut cfg = AppConfig::default();
+        assert!(cfg.log_dir.is_empty());
+        let mkv = Path::new("C:/Movies/Od/The.Odyssey.2026.1080p.mkv");
+        let resolved = cfg.resolve_log_dir(
+            mkv,
+            Path::new("C:/Movies/Od"),
+            Path::new("C:/Movies/Od/output"),
+            "The Odyssey",
+        );
+        assert_eq!(resolved, Path::new("C:/Movies/Od"));
+
+        cfg.log_filename_pattern = "{mkv}_{method}_{tracks}t".to_string();
+        let fname = cfg.format_log_filename("The Odyssey", "The.Odyssey.2026.1080p", 2, "warp");
+        assert_eq!(fname, "The.Odyssey.2026.1080p_warp_2t.log");
+
+        cfg.log_filename_pattern = "{title}_sync.txt".to_string();
+        let fname2 = cfg.format_log_filename("The Odyssey: Cut", "movie", 1, "corr");
+        assert_eq!(fname2, "The Odyssey_ Cut_sync.txt");
     }
 
     #[test]
@@ -175,6 +262,7 @@ mod tests {
             ref_sig[i] = ((0.5 * s1 + 0.5 * s2) as f32) * 0.4;
         }
 
+        let cancel = std::sync::atomic::AtomicBool::new(false);
         let fp = fingerprint_align(&ref_sig, &ref_sig, sr);
         let lattice = build_candidate_lattice(
             &ref_sig,
@@ -187,6 +275,7 @@ mod tests {
             Some(&fp),
             5,
             true,
+            &cancel,
             |_, _| {},
         );
         let (pts, _) = decode_warp_path(&lattice, 0.0, Some(&fp));
@@ -206,7 +295,8 @@ mod tests {
             w.finalize().unwrap();
         }
 
-        render_warped_wav_streaming(&src_wav, &out_wav, &plan, dur_sec as f64, 50).unwrap();
+        render_warped_wav_streaming(&src_wav, &out_wav, &plan, dur_sec as f64, 50, &cancel, |_| {})
+            .unwrap();
         let (out_mono, out_sr) = read_wav_mono_f32(&out_wav).unwrap();
         assert_eq!(out_sr, sr);
         assert_eq!(out_mono.len(), n);
@@ -232,9 +322,14 @@ mod tests {
             2,
             &[],
             50,
+            &cancel,
         )
         .unwrap();
         assert!(gaps.is_empty());
+
+        assert_eq!(crate::pipeline::format_human_duration(42.2), "42s");
+        assert_eq!(crate::pipeline::format_human_duration(80.0), "1m 20s");
+        assert_eq!(crate::pipeline::format_human_duration(3852.0), "1h 4m 12s");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

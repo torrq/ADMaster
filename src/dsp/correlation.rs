@@ -2,6 +2,8 @@ use crate::dsp::filters::{filter_multiband_into, BAND_WEIGHTS};
 use rayon::prelude::*;
 use rustfft::{num_complex::Complex, FftPlanner};
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct AnchorMeasurement {
@@ -17,76 +19,170 @@ pub struct OffsetCluster {
     pub count: usize,
 }
 
+/// Smallest even 5-smooth length (`2^a * 3^b * 5^c`, `a >= 1`) >= `min_len`.
+/// Matches SciPy's `next_fast_len` behavior so FFT sizes stay tightly bounded instead of jumping 2x.
+pub fn next_fast_even_len(min_len: usize) -> usize {
+    if min_len <= 2 {
+        return 2;
+    }
+    let mut best = min_len.next_power_of_two();
+    let mut p5 = 1usize;
+    while p5 < best {
+        let mut p35 = p5;
+        while p35 < best {
+            let mut n = match p35.checked_mul(2) {
+                Some(v) => v,
+                None => break,
+            };
+            while n < min_len {
+                n = match n.checked_mul(2) {
+                    Some(v) => v,
+                    None => break,
+                };
+            }
+            if n >= min_len && n < best {
+                best = n;
+            }
+            p35 = match p35.checked_mul(3) {
+                Some(v) => v,
+                None => break,
+            };
+        }
+        p5 = match p5.checked_mul(5) {
+            Some(v) => v,
+            None => break,
+        };
+    }
+    best
+}
+
+struct CorrFftWorkspace {
+    planner: FftPlanner<f32>,
+    buf: Vec<Complex<f32>>,
+    scratch: Vec<Complex<f32>>,
+    cs: Vec<f64>,
+}
+
+impl CorrFftWorkspace {
+    fn new() -> Self {
+        Self {
+            planner: FftPlanner::<f32>::new(),
+            buf: Vec::new(),
+            scratch: Vec::new(),
+            cs: Vec::new(),
+        }
+    }
+
+    fn run_normalized(&mut self, v_sig: &[f32], a_sig: &[f32]) -> Option<Vec<f64>> {
+        let n = v_sig.len();
+        let m = a_sig.len();
+        if n < m || m == 0 {
+            return None;
+        }
+
+        // Center template `a_sig` and compute its L2 norm in f64
+        let a_mean: f64 = a_sig.iter().map(|&x| x as f64).sum::<f64>() / (m as f64);
+        let mut a_energy_sq = 0.0_f64;
+        for &x in a_sig {
+            let c = (x as f64) - a_mean;
+            a_energy_sq += c * c;
+        }
+        let a_energy = a_energy_sq.sqrt();
+        if a_energy < 1e-10 {
+            return None;
+        }
+
+        let v_mean: f64 = v_sig.iter().map(|&x| x as f64).sum::<f64>() / (n as f64);
+        let fft_len = next_fast_even_len(n + m - 1);
+
+        let fft_fwd = self.planner.plan_fft_forward(fft_len);
+        let fft_inv = self.planner.plan_fft_inverse(fft_len);
+        let req_scratch = fft_fwd
+            .get_inplace_scratch_len()
+            .max(fft_inv.get_inplace_scratch_len());
+
+        if self.buf.len() < fft_len {
+            self.buf.resize(fft_len, Complex::new(0.0_f32, 0.0_f32));
+        }
+        if self.scratch.len() < req_scratch {
+            self.scratch
+                .resize(req_scratch, Complex::new(0.0_f32, 0.0_f32));
+        }
+
+        // Pack both real signals into one complex buffer: re = v_centered, im = a_rev_centered.
+        // This cuts 3 FFTs down to 2 FFTs and halves memory bandwidth.
+        let buf = &mut self.buf[..fft_len];
+        for slot in buf.iter_mut() {
+            *slot = Complex::new(0.0_f32, 0.0_f32);
+        }
+
+        self.cs.clear();
+        self.cs.reserve(n + 1);
+        self.cs.push(0.0_f64);
+        let mut running_sq = 0.0_f64;
+        for (i, &x) in v_sig.iter().enumerate() {
+            let c = (x as f64) - v_mean;
+            buf[i].re = c as f32;
+            running_sq += c * c;
+            self.cs.push(running_sq);
+        }
+
+        for (i, &x) in a_sig.iter().rev().enumerate() {
+            buf[i].im = ((x as f64) - a_mean) as f32;
+        }
+
+        fft_fwd.process_with_scratch(buf, &mut self.scratch[..req_scratch]);
+
+        // Unpack V[k] and A[k] via Hermitian symmetry and multiply V[k] * A[k] in place
+        let half = fft_len / 2;
+        buf[0] = Complex::new(buf[0].re * buf[0].im, 0.0_f32);
+        buf[half] = Complex::new(buf[half].re * buf[half].im, 0.0_f32);
+        for k in 1..half {
+            let j = fft_len - k;
+            let z1 = buf[k];
+            let z2 = buf[j];
+            let v_re = 0.5_f32 * (z1.re + z2.re);
+            let v_im = 0.5_f32 * (z1.im - z2.im);
+            let a_re = 0.5_f32 * (z1.im + z2.im);
+            let a_im = 0.5_f32 * (z2.re - z1.re);
+            let p_re = v_re * a_re - v_im * a_im;
+            let p_im = v_re * a_im + v_im * a_re;
+            buf[k] = Complex::new(p_re, p_im);
+            buf[j] = Complex::new(p_re, -p_im);
+        }
+
+        fft_inv.process_with_scratch(buf, &mut self.scratch[..req_scratch]);
+
+        let out_len = n - m + 1;
+        let inv_fft = 1.0 / (fft_len as f64);
+        let mut out = Vec::with_capacity(out_len);
+        // Guard against prefix-sum cancellation in near-silent passages (matches ADSync compute.py)
+        let energy_tol = (4.0 * f64::EPSILON * (n as f64) * running_sq).max(1e-20);
+
+        for k in 0..out_len {
+            let raw_dot = (buf[k + m - 1].re as f64) * inv_fft;
+            let win_energy_sq = self.cs[k + m] - self.cs[k];
+            if win_energy_sq > energy_tol {
+                let denom = a_energy * win_energy_sq.sqrt();
+                out.push((raw_dot / denom).clamp(-1.0, 1.0));
+            } else {
+                out.push(0.0);
+            }
+        }
+
+        Some(out)
+    }
+}
+
+thread_local! {
+    static CORR_WORKSPACE: RefCell<CorrFftWorkspace> = RefCell::new(CorrFftWorkspace::new());
+}
+
 /// Computes normalized sliding cross-correlation (`mode="valid"`) between `v_sig` (length N)
-/// and `a_sig` (length M, N >= M) using FFT convolution and O(N) prefix-sum energy normalization.
+/// and `a_sig` (length M, N >= M) using cached 5-smooth f32 SIMD FFT convolution with
+/// two-real-in-one packing and O(N) f64 prefix-sum energy normalization.
 pub fn normalized_sliding_correlation(v_sig: &[f32], a_sig: &[f32]) -> Option<Vec<f64>> {
-    let n = v_sig.len();
-    let m = a_sig.len();
-    if n < m || m == 0 {
-        return None;
-    }
-
-    // Center template `a_sig` and compute its L2 norm
-    let a_mean: f64 = a_sig.iter().map(|&x| x as f64).sum::<f64>() / (m as f64);
-    let mut a_energy_sq = 0.0_f64;
-    for &x in a_sig {
-        let c = (x as f64) - a_mean;
-        a_energy_sq += c * c;
-    }
-    let a_energy = a_energy_sq.sqrt();
-    if a_energy < 1e-10 {
-        return None;
-    }
-
-    // Center search region `v_sig`
-    let v_mean: f64 = v_sig.iter().map(|&x| x as f64).sum::<f64>() / (n as f64);
-
-    // Choose power-of-two FFT length >= n + m - 1
-    let fft_len = (n + m - 1).next_power_of_two();
-    let mut planner = FftPlanner::<f64>::new();
-    let fft_fwd = planner.plan_fft_forward(fft_len);
-    let fft_inv = planner.plan_fft_inverse(fft_len);
-
-    let mut v_buf = vec![Complex::new(0.0_f64, 0.0_f64); fft_len];
-    let mut a_buf = vec![Complex::new(0.0_f64, 0.0_f64); fft_len];
-
-    // Also build prefix sum of squared centered v_sig for O(1) window energy lookup
-    let mut cs = Vec::with_capacity(n + 1);
-    cs.push(0.0_f64);
-    let mut running_sq = 0.0_f64;
-    for (i, &x) in v_sig.iter().enumerate() {
-        let c = (x as f64) - v_mean;
-        v_buf[i].re = c;
-        running_sq += c * c;
-        cs.push(running_sq);
-    }
-
-    // Reverse template a_sig into a_buf[0..m] for cross-correlation via convolution
-    for (i, &x) in a_sig.iter().rev().enumerate() {
-        a_buf[i].re = (x as f64) - a_mean;
-    }
-
-    fft_fwd.process(&mut v_buf);
-    fft_fwd.process(&mut a_buf);
-
-    for (vc, ac) in v_buf.iter_mut().zip(a_buf.iter()) {
-        *vc *= *ac;
-    }
-
-    fft_inv.process(&mut v_buf);
-
-    let out_len = n - m + 1;
-    let inv_fft = 1.0 / (fft_len as f64);
-    let mut out = Vec::with_capacity(out_len);
-
-    for k in 0..out_len {
-        let raw_dot = v_buf[k + m - 1].re * inv_fft;
-        let win_energy_sq = (cs[k + m] - cs[k]).max(1e-20);
-        let denom = a_energy * win_energy_sq.sqrt();
-        out.push(raw_dot / denom);
-    }
-
-    Some(out)
+    CORR_WORKSPACE.with(|ws| ws.borrow_mut().run_normalized(v_sig, a_sig))
 }
 
 /// Computes 3-band narration-suppressed normalized sliding cross-correlation.
@@ -252,6 +348,7 @@ pub fn find_offset_candidates(
 }
 
 /// Evaluates `num_anchors` across 5%..88% of `target_duration` in parallel using `rayon`.
+#[allow(clippy::too_many_arguments)]
 pub fn evaluate_anchor_correlations<F>(
     base_samples: &[f32],
     ad_samples: &[f32],
@@ -259,10 +356,11 @@ pub fn evaluate_anchor_correlations<F>(
     target_duration: f64,
     num_anchors: usize,
     multiband: bool,
+    cancel_flag: &AtomicBool,
     on_anchor: F,
 ) -> Vec<AnchorMeasurement>
 where
-    F: Fn(usize, usize, & [AnchorMeasurement]) + Sync,
+    F: Fn(usize, usize, &[AnchorMeasurement]) + Sync,
 {
     let n_anchors = num_anchors.max(1);
     let t_start = target_duration * 0.05;
@@ -292,9 +390,15 @@ where
     let mut results = Vec::with_capacity(total_valid);
     let batch_size = 8;
     for chunk in anchor_times.chunks(batch_size) {
+        if cancel_flag.load(Ordering::Relaxed) {
+            break;
+        }
         let batch_meas: Vec<AnchorMeasurement> = chunk
             .par_iter()
             .filter_map(|&anchor| {
+                if cancel_flag.load(Ordering::Relaxed) {
+                    return None;
+                }
                 let base_start = (anchor * sr_f) as usize;
                 let base_end = (((anchor + 30.0) * sr_f) as usize).min(base_samples.len());
                 if base_start >= base_end {

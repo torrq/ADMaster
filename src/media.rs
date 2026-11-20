@@ -1,9 +1,12 @@
 use crate::config::AppConfig;
 use serde::Deserialize;
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -207,6 +210,279 @@ pub struct AudioStreamInfo {
     pub sample_rate: u32,
 }
 
+#[derive(Debug, Clone)]
+pub struct AudioStreamSummary {
+    pub selector: String,       // e.g. "0:a:0"
+    pub compact_label: String,  // e.g. "#1 English 5.1 (6ch) EAC3 (Default)"
+    pub detail_tooltip: String, // Full metadata on hover
+    pub is_default: bool,
+}
+
+#[derive(Deserialize)]
+struct FfprobeStreamListOutput {
+    streams: Option<Vec<FfprobeDetailedStream>>,
+}
+
+#[derive(Deserialize)]
+struct FfprobeDetailedStream {
+    codec_name: Option<String>,
+    profile: Option<String>,
+    channels: Option<u32>,
+    channel_layout: Option<String>,
+    sample_rate: Option<String>,
+    tags: Option<std::collections::HashMap<String, String>>,
+    disposition: Option<FfprobeDisposition>,
+}
+
+#[derive(Deserialize)]
+struct FfprobeDisposition {
+    default: Option<i32>,
+    comment: Option<i32>,
+    visual_impaired: Option<i32>,
+}
+
+fn friendly_language_name(code: &str) -> Option<String> {
+    let c = code.trim().to_ascii_lowercase();
+    if c.is_empty() || c == "und" || c == "unk" || c == "zxx" {
+        return None;
+    }
+    let name = match c.as_str() {
+        "eng" | "en" => "English",
+        "fra" | "fre" | "fr" => "French",
+        "spa" | "es" => "Spanish",
+        "deu" | "ger" | "de" => "German",
+        "ita" | "it" => "Italian",
+        "jpn" | "ja" => "Japanese",
+        "por" | "pt" => "Portuguese",
+        "kor" | "ko" => "Korean",
+        "zho" | "chi" | "zh" => "Chinese",
+        "rus" | "ru" => "Russian",
+        "hin" | "hi" => "Hindi",
+        "pol" | "pl" => "Polish",
+        "nld" | "dut" | "nl" => "Dutch",
+        "swe" | "sv" => "Swedish",
+        "nor" | "nb" | "nn" | "no" => "Norwegian",
+        "dan" | "da" => "Danish",
+        "fin" | "fi" => "Finnish",
+        "ces" | "cze" | "cs" => "Czech",
+        "tur" | "tr" => "Turkish",
+        "ara" | "ar" => "Arabic",
+        "heb" | "he" => "Hebrew",
+        "ukr" | "uk" => "Ukrainian",
+        _ => return Some(c.to_ascii_uppercase()),
+    };
+    Some(name.to_string())
+}
+
+fn friendly_codec_name(codec: &str, profile: Option<&str>) -> String {
+    let c = codec.trim().to_ascii_lowercase();
+    let p = profile.unwrap_or("").to_ascii_lowercase();
+    match c.as_str() {
+        "eac3" => "EAC3".to_string(),
+        "ac3" => "AC3".to_string(),
+        "truehd" => {
+            if p.contains("atmos") {
+                "TrueHD Atmos".to_string()
+            } else {
+                "TrueHD".to_string()
+            }
+        }
+        "dts" => {
+            if p.contains("ma") {
+                "DTS-HD MA".to_string()
+            } else if p.contains("hra") {
+                "DTS-HD HRA".to_string()
+            } else if p.contains("dts:x") {
+                "DTS:X".to_string()
+            } else {
+                "DTS".to_string()
+            }
+        }
+        "aac" => "AAC".to_string(),
+        "flac" => "FLAC".to_string(),
+        "opus" => "Opus".to_string(),
+        "mp3" => "MP3".to_string(),
+        "vorbis" => "Vorbis".to_string(),
+        s if s.starts_with("pcm_") => "PCM".to_string(),
+        "" => "Audio".to_string(),
+        other => other.to_ascii_uppercase(),
+    }
+}
+
+fn compact_channel_label(channels: u32, layout: Option<&str>) -> String {
+    let lay = layout.unwrap_or("").to_ascii_lowercase();
+    match channels {
+        1 => "1.0 (1ch)".to_string(),
+        2 => "2.0 (2ch)".to_string(),
+        6 => "5.1 (6ch)".to_string(),
+        8 => "7.1 (8ch)".to_string(),
+        _ if lay.contains("5.1") => format!("5.1 ({}ch)", channels),
+        _ if lay.contains("7.1") => format!("7.1 ({}ch)", channels),
+        _ if channels > 0 => format!("{}ch", channels),
+        _ => String::new(),
+    }
+}
+
+/// Probes all audio streams inside `input_path` via `ffprobe` for human-readable stream selection.
+pub fn probe_audio_streams(ffprobe_bin: &Path, input_path: &Path) -> Vec<AudioStreamSummary> {
+    if !input_path.exists() {
+        return Vec::new();
+    }
+    let mut cmd = Command::new(ffprobe_bin);
+    apply_no_window(&mut cmd);
+    cmd.args([
+        "-v",
+        "error",
+        "-select_streams",
+        "a",
+        "-show_entries",
+        "stream=codec_name,profile,channels,channel_layout,sample_rate:stream_tags=language,title:stream_disposition=default,comment,visual_impaired",
+        "-of",
+        "json",
+    ])
+    .arg(input_path)
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+
+    let Ok(out) = cmd.output() else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let Ok(parsed) = serde_json::from_slice::<FfprobeStreamListOutput>(&out.stdout) else {
+        return Vec::new();
+    };
+
+    let mut results = Vec::new();
+    for (idx, st) in parsed.streams.unwrap_or_default().into_iter().enumerate() {
+        let selector = format!("0:a:{}", idx);
+        let channels = st.channels.unwrap_or(0);
+        let codec = friendly_codec_name(
+            st.codec_name.as_deref().unwrap_or(""),
+            st.profile.as_deref(),
+        );
+        let ch_str = compact_channel_label(channels, st.channel_layout.as_deref());
+        let sr_khz = st
+            .sample_rate
+            .as_deref()
+            .and_then(|s| s.parse::<f64>().ok())
+            .map(|hz| format!("{:.1} kHz", hz / 1000.0))
+            .unwrap_or_default();
+
+        let mut lang_raw = String::new();
+        let mut title_raw = String::new();
+        if let Some(tags) = &st.tags {
+            for (k, v) in tags {
+                if k.eq_ignore_ascii_case("language") {
+                    lang_raw = v.trim().to_string();
+                } else if k.eq_ignore_ascii_case("title") {
+                    title_raw = v.trim().to_string();
+                }
+            }
+        }
+        let lang_opt = friendly_language_name(&lang_raw);
+
+        let is_default = st
+            .disposition
+            .as_ref()
+            .and_then(|d| d.default)
+            .unwrap_or(0)
+            != 0;
+        let is_comment = st
+            .disposition
+            .as_ref()
+            .and_then(|d| d.comment)
+            .unwrap_or(0)
+            != 0;
+        let is_ad = st
+            .disposition
+            .as_ref()
+            .and_then(|d| d.visual_impaired)
+            .unwrap_or(0)
+            != 0;
+
+        // Build compact label: "#1 English 5.1 (6ch) EAC3 (Default)"
+        let mut parts: Vec<String> = vec![format!("#{}", idx + 1)];
+        if let Some(ref lang) = lang_opt {
+            parts.push(lang.clone());
+        }
+        if !ch_str.is_empty() {
+            parts.push(ch_str.clone());
+        }
+        parts.push(codec.clone());
+
+        let mut compact = parts.join(" ");
+
+        // Append a concise tag if Commentary or AD or short distinct title
+        let title_lower = title_raw.to_ascii_lowercase();
+        if is_ad || title_lower.contains("audio description") || title_lower.contains("descriptive") {
+            compact.push_str(" [AD]");
+        } else if is_comment || title_lower.contains("commentary") {
+            compact.push_str(" [Commentary]");
+        } else if !title_raw.is_empty()
+            && !title_lower.starts_with("surround")
+            && !title_lower.starts_with("stereo")
+            && !title_lower.contains(&codec.to_ascii_lowercase())
+        {
+            let short_t: String = title_raw.chars().take(18).collect();
+            let trimmed = short_t.trim();
+            if !trimmed.is_empty() {
+                compact.push_str(" -- ");
+                compact.push_str(trimmed);
+                if title_raw.chars().count() > 18 {
+                    compact.push_str("...");
+                }
+            }
+        }
+        if is_default {
+            compact.push_str(" (Default)");
+        }
+
+        // Rich tooltip on hover
+        let mut tip_lines = vec![format!("Stream: {}", selector)];
+        if let Some(ref lang) = lang_opt {
+            tip_lines.push(format!("Language: {} ({})", lang, lang_raw));
+        }
+        tip_lines.push(format!(
+            "Format: {} {} {}",
+            codec,
+            ch_str,
+            if sr_khz.is_empty() {
+                String::new()
+            } else {
+                format!("@ {}", sr_khz)
+            }
+        ));
+        if !title_raw.is_empty() {
+            tip_lines.push(format!("Title: {}", title_raw));
+        }
+        let mut flags = Vec::new();
+        if is_default {
+            flags.push("Default");
+        }
+        if is_comment {
+            flags.push("Commentary");
+        }
+        if is_ad {
+            flags.push("Audio Description");
+        }
+        if !flags.is_empty() {
+            tip_lines.push(format!("Flags: {}", flags.join(", ")));
+        }
+
+        results.push(AudioStreamSummary {
+            selector,
+            compact_label: compact,
+            detail_tooltip: tip_lines.join("\n"),
+            is_default,
+        });
+    }
+
+    results
+}
+
 #[derive(Deserialize)]
 struct FfprobeOutput {
     streams: Option<Vec<FfprobeStream>>,
@@ -319,18 +595,162 @@ pub fn get_audio_info(
     })
 }
 
+/// Runs a child process (FFmpeg or mkvmerge) with instant cancellation and live progress reporting.
+/// Parses FFmpeg `-progress pipe:1` (`out_time_us=` / `out_time_ms=`) and mkvmerge (`Progress: N%`)
+/// lines from stdout without blocking cancellation. When `cancel_flag` trips, kills the child
+/// immediately (`child.kill()`), reaps it, deletes `partial_output_to_clean`, and returns `Err("Cancelled")`.
+pub fn run_cancellable_command<F>(
+    cmd: &mut Command,
+    cancel_flag: &AtomicBool,
+    expected_duration_sec: Option<f64>,
+    partial_output_to_clean: Option<&Path>,
+    mut on_progress: F,
+) -> Result<(ExitStatus, Vec<u8>, Vec<u8>), String>
+where
+    F: FnMut(f64),
+{
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err("Cancelled".to_string());
+    }
+
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn process: {}", e))?;
+
+    let prog_permille = Arc::new(AtomicU64::new(0));
+    let dur_us = expected_duration_sec
+        .filter(|&d| d.is_finite() && d > 0.05)
+        .map(|d| d * 1_000_000.0);
+
+    let stdout_handle = child.stdout.take().map(|out_pipe| {
+        let p_arc = Arc::clone(&prog_permille);
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(out_pipe);
+            let mut collected = Vec::new();
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let trimmed = line.trim();
+                        if let Some(total_us) = dur_us {
+                            if let Some(val) = trimmed
+                                .strip_prefix("out_time_us=")
+                                .or_else(|| trimmed.strip_prefix("out_time_ms="))
+                            {
+                                if let Ok(us) = val.trim().parse::<i64>() {
+                                    if us > 0 {
+                                        let pm = (((us as f64) / total_us).clamp(0.0, 0.999)
+                                            * 1000.0)
+                                            as u64;
+                                        p_arc.store(pm, Ordering::Relaxed);
+                                    }
+                                }
+                            } else if trimmed == "progress=end" {
+                                p_arc.store(1000, Ordering::Relaxed);
+                            }
+                        }
+                        if let Some(rest) = trimmed.strip_prefix("Progress:") {
+                            if let Some(num_str) = rest.trim().strip_suffix('%') {
+                                if let Ok(pct) = num_str.trim().parse::<f64>() {
+                                    let pm = ((pct / 100.0).clamp(0.0, 1.0) * 1000.0) as u64;
+                                    p_arc.store(pm, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                        if collected.len() < 256 * 1024 {
+                            collected.extend_from_slice(line.as_bytes());
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            collected
+        })
+    });
+
+    let stderr_handle = child.stderr.take().map(|mut err_pipe| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = err_pipe.read_to_end(&mut buf);
+            buf
+        })
+    });
+
+    let mut last_pm = u64::MAX;
+    let status = loop {
+        if cancel_flag.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            if let Some(h) = stdout_handle {
+                let _ = h.join();
+            }
+            if let Some(h) = stderr_handle {
+                let _ = h.join();
+            }
+            if let Some(p) = partial_output_to_clean {
+                let _ = fs::remove_file(p);
+            }
+            return Err("Cancelled".to_string());
+        }
+
+        let pm = prog_permille.load(Ordering::Relaxed);
+        if pm != last_pm {
+            last_pm = pm;
+            on_progress((pm as f64) / 1000.0);
+        }
+
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) => std::thread::sleep(Duration::from_millis(45)),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("Process wait error: {}", e));
+            }
+        }
+    };
+
+    let stdout_bytes = stdout_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+    let stderr_bytes = stderr_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+
+    if status.success() {
+        on_progress(1.0);
+    }
+
+    Ok((status, stdout_bytes, stderr_bytes))
+}
+
 /// Pre-decodes any audio/video stream to an 8kHz (or 16kHz) mono 16-bit PCM WAV with atomic temp-file replacement.
-pub fn predecode_to_mono_wav(
+/// If `speed_stretch` is `Some(s)` with `|s - 1.0| > 1e-5`, applies sample-accurate clock scaling
+/// `asetrate = input_sr / s` before resampling to `target_sr` (e.g. `s = 25.0 / 23.976023976` for PAL -> film).
+#[allow(clippy::too_many_arguments)]
+pub fn predecode_to_mono_wav<F>(
     ffmpeg_bin: &Path,
     input_path: &Path,
     scratch_dir: &Path,
     label: &str,
     target_sr: u32,
     stream_map: Option<&str>,
-    is_pal: bool,
+    speed_stretch: Option<f64>,
     input_sr: u32,
     threads: usize,
-) -> Result<PathBuf, String> {
+    expected_duration_sec: Option<f64>,
+    cancel_flag: &AtomicBool,
+    on_progress: F,
+) -> Result<PathBuf, String>
+where
+    F: FnMut(f64),
+{
     fs::create_dir_all(scratch_dir)
         .map_err(|e| format!("Failed to create scratch dir: {}", e))?;
 
@@ -350,8 +770,10 @@ pub fn predecode_to_mono_wav(
         })
         .take(64)
         .collect();
-    if is_pal {
-        safe_name.push_str("_pal");
+    let active_stretch = speed_stretch.filter(|&s| s.is_finite() && s > 0.5 && s < 2.0 && (s - 1.0).abs() > 1e-5);
+    if let Some(s) = active_stretch {
+        let tag = format!("_spd{:.5}", s).replace('.', "p");
+        safe_name.push_str(&tag);
     }
     let suffix = format!("_mono{}k.wav", target_sr / 1000);
     let out_wav = scratch_dir.join(format!("{}{}", safe_name, suffix));
@@ -367,9 +789,9 @@ pub fn predecode_to_mono_wav(
     }
 
     let mut af_chain = vec!["asetpts=PTS-STARTPTS".to_string()];
-    if is_pal {
-        let pal_rate = (input_sr as f64) * (23.976023976 / 25.0);
-        af_chain.push(format!("asetrate={:.3}", pal_rate));
+    if let Some(s) = active_stretch {
+        let target_clock = (input_sr as f64) / s;
+        af_chain.push(format!("asetrate={:.6}", target_clock));
     }
     af_chain.push(format!("aresample={}", target_sr));
     af_chain.push("pan=mono|c0=c0".to_string());
@@ -406,18 +828,22 @@ pub fn predecode_to_mono_wav(
         "auto",
         "-f",
         "wav",
+        "-progress",
+        "pipe:1",
+        "-nostats",
     ])
-    .arg(&tmp_wav)
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
+    .arg(&tmp_wav);
 
-    let out = cmd
-        .output()
-        .map_err(|e| format!("Failed to spawn ffmpeg: {}", e))?;
-    if !out.status.success() || !tmp_wav.exists() {
+    let (status, _stdout, stderr) = run_cancellable_command(
+        &mut cmd,
+        cancel_flag,
+        expected_duration_sec,
+        Some(&tmp_wav),
+        on_progress,
+    )?;
+    if !status.success() || !tmp_wav.exists() {
         let _ = fs::remove_file(&tmp_wav);
-        let err = String::from_utf8_lossy(&out.stderr);
+        let err = String::from_utf8_lossy(&stderr);
         return Err(format!(
             "Failed to pre-decode '{}' to {}Hz mono WAV: {}",
             input_path.display(),
@@ -431,6 +857,7 @@ pub fn predecode_to_mono_wav(
 }
 
 /// Extracts or retrieves a clean 48kHz 2.0 stereo 16-bit PCM WAV downmix of the reference master audio.
+#[allow(clippy::too_many_arguments)]
 pub fn extract_master_stereo_wav(
     ffmpeg_bin: &Path,
     ref_path: &Path,
@@ -438,6 +865,7 @@ pub fn extract_master_stereo_wav(
     channels: u32,
     scratch_dir: &Path,
     threads: usize,
+    cancel_flag: &AtomicBool,
 ) -> Result<PathBuf, String> {
     let ref_stereo_wav = scratch_dir.join("ref_master_stereo_48k.wav");
     if ref_stereo_wav.exists() {
@@ -490,19 +918,15 @@ pub fn extract_master_stereo_wav(
         "-f",
         "wav",
     ])
-    .arg(&tmp_wav)
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
+    .arg(&tmp_wav);
 
-    let out = cmd
-        .output()
-        .map_err(|e| format!("Failed to extract master stereo WAV: {}", e))?;
-    if !out.status.success() || !tmp_wav.exists() {
+    let (status, _stdout, stderr) =
+        run_cancellable_command(&mut cmd, cancel_flag, None, Some(&tmp_wav), |_| {})?;
+    if !status.success() || !tmp_wav.exists() {
         let _ = fs::remove_file(&tmp_wav);
         return Err(format!(
             "FFmpeg failed extracting master stereo WAV: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            String::from_utf8_lossy(&stderr).trim()
         ));
     }
 
@@ -893,6 +1317,7 @@ pub fn mux_video_sample(
     audio_src: &Path,
     out_mkv: &Path,
     render_duration: f64,
+    cancel_flag: &AtomicBool,
 ) -> Result<(), String> {
     let mut cmd = Command::new(ffmpeg_bin);
     apply_no_window(&mut cmd);
@@ -925,14 +1350,12 @@ pub fn mux_video_sample(
         "-disposition:a:0",
         "default",
     ])
-    .arg(out_mkv)
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
+    .arg(out_mkv);
 
-    let out = cmd.output().map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    let (status, _stdout, stderr) =
+        run_cancellable_command(&mut cmd, cancel_flag, Some(render_duration), Some(out_mkv), |_| {})?;
+    if !status.success() {
+        return Err(String::from_utf8_lossy(&stderr).trim().to_string());
     }
     Ok(())
 }
@@ -957,13 +1380,19 @@ struct MkvMergeTrackProps {
 }
 
 /// Multiplexes reference video, downmixed main stereo, and synced AD stereo tracks into a final MKV using `mkvmerge`.
-pub fn mux_final_mkv(
+#[allow(clippy::too_many_arguments)]
+pub fn mux_final_mkv<F>(
     mkvmerge_bin: &Path,
     ref_mkv: &Path,
     main_stereo: &Path,
     ad_tracks_stereo: &[PathBuf],
     out_mkv: &Path,
-) -> Result<(), String> {
+    cancel_flag: &AtomicBool,
+    on_progress: F,
+) -> Result<(), String>
+where
+    F: FnMut(f64),
+{
     if !mkvmerge_bin.exists() {
         return Err("mkvmerge binary not found for final MKV multiplexing".to_string());
     }
@@ -1056,23 +1485,19 @@ pub fn mux_final_mkv(
         mux_cmd.args(["--track-order", &order.join(",")]);
     }
 
-    mux_cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let res = mux_cmd.output().map_err(|e| e.to_string())?;
-    let code = res.status.code().unwrap_or(2);
+    let (status, stdout, stderr) =
+        run_cancellable_command(&mut mux_cmd, cancel_flag, None, Some(out_mkv), on_progress)?;
+    let code = status.code().unwrap_or(2);
     if (code == 0 || code == 1)
         && out_mkv.exists()
         && fs::metadata(out_mkv).map(|m| m.len()).unwrap_or(0) > 1000
     {
         Ok(())
     } else {
-        Err(format!(
-            "mkvmerge failed (code {}): {}",
-            code,
-            String::from_utf8_lossy(&res.stderr).trim()
-        ))
+        let mut msg = String::from_utf8_lossy(&stderr).trim().to_string();
+        if msg.is_empty() {
+            msg = String::from_utf8_lossy(&stdout).trim().to_string();
+        }
+        Err(format!("mkvmerge failed (code {}): {}", code, msg))
     }
 }
